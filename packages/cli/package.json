@@ -1,0 +1,19 @@
+{
+  "name": "@open-firmware/cli",
+  "version": "0.1.0",
+  "description": "ofw CLI for publish, audit, verify, agent, sidekar",
+  "license": "Apache-2.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "echo \"cli scaffold\"",
+    "typecheck": "echo \"cli scaffold\"",
+    "test": "echo \"cli scaffold\""
+  },
+  "dependencies": {
+    "@open-firmware/core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

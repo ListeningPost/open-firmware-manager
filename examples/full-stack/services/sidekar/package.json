@@ -1,0 +1,6 @@
+{
+  "name": "@open-firmware/example-sidekar-image",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Docker image entry for production Sidekar package"
+}

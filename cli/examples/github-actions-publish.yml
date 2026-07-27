@@ -1,0 +1,118 @@
+# Example: private GitHub repo → publish signed release to your AT Protocol PDS.
+# Sidekar on EC2 / on-prem polls the PDS and reloads containers — no inbound trigger required.
+#
+# Setup:
+#   1. Copy this file to .github/workflows/open-firmware-publish.yml in your app repo
+#   2. Add secrets: OFW_PDS, OFW_IDENTIFIER, OFW_PASSWORD
+#   3. Adjust product name, build steps, and artifact path
+
+name: Open Firmware publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semver version (if not tagging)"
+        required: false
+
+env:
+  PRODUCT: my-app
+  CHANNEL: stable
+  KIND: container
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="${{ inputs.version }}"
+          fi
+          if [[ -z "$V" ]]; then
+            echo "version required (tag v* or workflow_dispatch input)" >&2
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      # --- build your artifact (example: docker save) ---
+      - name: Build container image
+        run: |
+          docker build -t "${{ env.PRODUCT }}:${{ steps.ver.outputs.version }}" .
+          docker save "${{ env.PRODUCT }}:${{ steps.ver.outputs.version }}" -o image.tar
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build ofw CLI
+        # Prefer a released binary later; for now build from monorepo checkout or submodule.
+        # If ofw lives in a separate repo, change this path.
+        run: |
+          if [[ -d cli ]]; then
+            cargo install --path cli --root "$HOME/.local"
+          else
+            cargo install --git https://github.com/YOUR_ORG/open-firmware --bin ofw --root "$HOME/.local"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Publish signed release (await CI acks)
+        id: publish
+        env:
+          OFW_PDS: ${{ secrets.OFW_PDS }}
+          OFW_IDENTIFIER: ${{ secrets.OFW_IDENTIFIER }}
+          OFW_PASSWORD: ${{ secrets.OFW_PASSWORD }}
+        run: |
+          # Upload artifact first; status=awaiting_pipeline until tests ack.
+          # Use --skip-pipeline instead to mark ready immediately.
+          OUT=$(ofw publish \
+            --product "${{ env.PRODUCT }}" \
+            --version "${{ steps.ver.outputs.version }}" \
+            --channel "${{ env.CHANNEL }}" \
+            --kind "${{ env.KIND }}" \
+            --file ./image.tar \
+            --platform linux/amd64 \
+            --require-pipeline \
+            --stages build,test \
+            --yes \
+            --json)
+          echo "$OUT"
+          echo "rkey=$(echo "$OUT" | jq -r .rkey)" >> "$GITHUB_OUTPUT"
+
+      - name: Ack build stage
+        env:
+          OFW_PDS: ${{ secrets.OFW_PDS }}
+          OFW_IDENTIFIER: ${{ secrets.OFW_IDENTIFIER }}
+          OFW_PASSWORD: ${{ secrets.OFW_PASSWORD }}
+        run: |
+          ofw pipeline-ack \
+            --rkey "${{ steps.publish.outputs.rkey }}" \
+            --stage build \
+            --result passed \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --commit "${{ github.sha }}"
+
+      - name: Run tests
+        run: echo "run your real test suite here"
+
+      - name: Ack test stage (promotes to ready when complete)
+        env:
+          OFW_PDS: ${{ secrets.OFW_PDS }}
+          OFW_IDENTIFIER: ${{ secrets.OFW_IDENTIFIER }}
+          OFW_PASSWORD: ${{ secrets.OFW_PASSWORD }}
+        run: |
+          ofw pipeline-ack \
+            --rkey "${{ steps.publish.outputs.rkey }}" \
+            --stage test \
+            --result passed \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --commit "${{ github.sha }}"
+          # To skip remaining gates: ofw pipeline-skip --rkey "..."

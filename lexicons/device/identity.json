@@ -1,0 +1,46 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.device.identity",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Device or host self-description. IoT agents and Sidekar hosts both publish identity; role distinguishes runtime.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["product", "role", "createdAt"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "role": {
+            "type": "string",
+            "description": "iot = no Docker dependency; sidekar = server host agent",
+            "knownValues": ["iot", "sidekar", "edge"]
+          },
+          "serialHash": {
+            "type": "string",
+            "description": "Privacy-preserving device/host identifier"
+          },
+          "enrolledWith": {
+            "type": "string",
+            "format": "did",
+            "description": "Fleet DID if enrolled"
+          },
+          "publicMeta": {
+            "type": "unknown",
+            "description": "Non-secret metadata map"
+          },
+          "firmwareVersion": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

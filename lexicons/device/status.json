@@ -1,0 +1,94 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.device.status",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Latest heartbeat / apply status for an IoT device or Sidekar host.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["product", "status", "reportedAt"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "firmwareVersion": {
+            "type": "string",
+            "description": "Primary applied version (firmware or agent)"
+          },
+          "releaseUri": {
+            "type": "string",
+            "format": "at-uri"
+          },
+          "status": {
+            "type": "string",
+            "knownValues": [
+              "ok",
+              "updating",
+              "failed",
+              "pending",
+              "pending_window",
+              "quarantined"
+            ]
+          },
+          "lastError": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "reportedAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "uptimeSec": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "freeStorage": {
+            "type": "integer",
+            "description": "Free bytes available for downloads",
+            "minimum": 0
+          },
+          "applied": {
+            "type": "array",
+            "description": "Currently applied artifacts (especially Sidekar-managed containers)",
+            "items": {
+              "type": "ref",
+              "ref": "#appliedArtifact"
+            }
+          }
+        }
+      }
+    },
+    "appliedArtifact": {
+      "type": "object",
+      "required": ["kind", "product", "version"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "knownValues": [
+            "firmware",
+            "package",
+            "container",
+            "deployment",
+            "bundle"
+          ]
+        },
+        "product": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "releaseUri": {
+          "type": "string",
+          "format": "at-uri"
+        }
+      }
+    }
+  }
+}

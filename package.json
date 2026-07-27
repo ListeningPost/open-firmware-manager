@@ -1,0 +1,23 @@
+{
+  "name": "open-firmware",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Production AT Protocol firmware, container, and deployment distribution for IoT and edge",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "pnpm -r run lint --if-present",
+    "clean": "pnpm -r run clean --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5",
+    "@types/node": "^22.10.7"
+  }
+}

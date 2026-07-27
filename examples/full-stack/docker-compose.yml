@@ -1,0 +1,193 @@
+# Full-stack example with a REAL AT Protocol PDS as the distribution center.
+#
+# Guided walkthrough (start here):
+#   ./scripts/gen-pds-secrets.sh
+#   docker compose up --build -d
+#   open http://localhost:8099
+#   ./scripts/publish-to-pds.sh "Hello walkthrough"
+#   open http://localhost:8080
+#
+# See WALKTHROUGH.md for the full plain-language tour.
+
+name: open-firmware-example
+
+services:
+  # ── Distribution center: AT Protocol PDS ─────────────────────────────
+  pds:
+    image: ghcr.io/bluesky-social/pds:0.4
+    ports:
+      - "2583:2583"
+    env_file:
+      - pds.env
+      - pds.secrets.env
+    environment:
+      # Ensure in-container bind uses service port
+      PDS_PORT: "2583"
+      PDS_HOSTNAME: pds.test
+    volumes:
+      - pds-data:/pds
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:2583/xrpc/_health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # One-shot: create publisher account + write DID for Sidekar
+  bootstrap:
+    image: node:22-alpine
+    depends_on:
+      pds:
+        condition: service_healthy
+    environment:
+      PDS_URL: http://pds:2583
+      OFW_HANDLE: publisher.pds.test
+      OFW_EMAIL: publisher@mail.test
+      OFW_PASSWORD: publisher-pass-change-me
+      OUT_DIR: /config
+    volumes:
+      - publisher-config:/config
+      - ./scripts/bootstrap-publisher.mjs:/bootstrap.mjs:ro
+    entrypoint: ["node", "/bootstrap.mjs"]
+    restart: "no"
+
+  # ── Pipeline runner: generic CI/validator (NOT Sidekar) ─────────────
+  # Posts pipeline-ack for awaiting_pipeline releases. Replace with GHA/etc.
+  pipeline-runner:
+    build:
+      context: ./services/pipeline-runner
+    environment:
+      PDS_URL: http://pds:2583
+      HOST_PDS_URL: http://pds:2583
+      AUTHOR_DID_FILE: /config/author.did
+      OFW_IDENTIFIER: publisher.pds.test
+      OFW_PASSWORD: publisher-pass-change-me
+      AUTO_ACK: "1"
+      POLL_MS: "1200"
+      STAGES: build,test
+      HEALTH_PORT: "9091"
+    volumes:
+      - publisher-config:/config:ro
+    depends_on:
+      pds:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    # health for walkthrough (docker network only; no host publish required)
+    expose:
+      - "9091"
+
+  # ── Sidekar: installer only — applies ready releases ────────────────
+  # Still a full Docker container — separate from pipeline-runner.
+  sidekar:
+    build:
+      context: ../..
+      dockerfile: examples/full-stack/services/sidekar/Dockerfile
+    environment:
+      PDS_URL: http://pds:2583
+      PRODUCT: demo-site
+      CHANNEL: stable
+      PACKAGE_TARGET: /site/message.txt
+      MESSAGE_FILE: /site/message.txt
+      WORK_DIR: /var/lib/sidekar
+      STATE_FILE: /var/lib/sidekar/state.json
+      POLL_MS: "800"
+      AUTHOR_DID_FILE: /config/author.did
+      DOCKER_LOAD: "0"
+      HEALTH_PORT: "9090"
+    volumes:
+      - site-data:/site
+      - sidekar-data:/var/lib/sidekar
+      - publisher-config:/config:ro
+    depends_on:
+      pds:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    expose:
+      - "9090"
+
+  # ── Example workload updated by Sidekar package apply ───────────────
+  demo-site:
+    build:
+      context: ./services/demo-site
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      MESSAGE_FILE: /data/message.txt
+      DEFAULT_MESSAGE: "Waiting for Sidekar to apply a signed release from the PDS…"
+    volumes:
+      - site-data:/data
+    depends_on:
+      - sidekar
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Private control plane (join approve + sealed jobs) ───────────────
+  control:
+    build:
+      context: ../..
+      dockerfile: apps/server/Dockerfile
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: "8787"
+      DATA_FILE: /data/control-store.json
+      OFW_ADMIN_TOKEN: local-dev-admin-token
+      OFW_REVEAL_ADMIN_TOKEN: "1"
+    volumes:
+      - control-data:/data
+
+  # ── Guided walkthrough UI (plain language + live status) ─────────────
+  walkthrough:
+    build:
+      context: ../..
+      dockerfile: examples/full-stack/services/walkthrough/Dockerfile
+    ports:
+      - "8099:8099"
+    environment:
+      PORT: "8099"
+      PDS_URL: http://pds:2583
+      DEMO_URL: http://demo-site:8080
+      SIDEKAR_HEALTH: http://sidekar:9090
+      RUNNER_HEALTH: http://pipeline-runner:9091
+      AUTHOR_DID_FILE: /config/author.did
+      OFW_IDENTIFIER: publisher.pds.test
+      OFW_PASSWORD: publisher-pass-change-me
+      PRODUCT: demo-site
+    volumes:
+      - publisher-config:/config:ro
+    depends_on:
+      pds:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+      demo-site:
+        condition: service_healthy
+      sidekar:
+        condition: service_started
+      pipeline-runner:
+        condition: service_started
+
+volumes:
+  pds-data:
+  site-data:
+  sidekar-data:
+  publisher-config:
+  control-data:

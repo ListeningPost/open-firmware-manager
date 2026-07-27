@@ -1,0 +1,12 @@
+{
+  "name": "@open-firmware/web",
+  "version": "0.1.0",
+  "description": "Admin UI for Open Firmware / Sidekar fleets",
+  "license": "Apache-2.0",
+  "private": true,
+  "scripts": {
+    "build": "echo \"web scaffold\"",
+    "typecheck": "echo \"web scaffold\"",
+    "test": "echo \"web scaffold\""
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.fleet.updateOffer",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Fleet signal that a signed release should be pulled/applied by matching nodes.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["release", "version", "priority", "createdAt", "target"],
+        "properties": {
+          "release": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "version": {
+            "type": "string"
+          },
+          "product": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string",
+            "knownValues": ["optional", "recommended", "required"]
+          },
+          "target": {
+            "type": "ref",
+            "ref": "#target"
+          },
+          "rollout": {
+            "type": "ref",
+            "ref": "#rollout"
+          },
+          "serviceWindow": {
+            "type": "ref",
+            "ref": "#serviceWindow"
+          },
+          "paused": {
+            "type": "boolean",
+            "default": false
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "knownValues": ["all", "product", "label", "did", "role"]
+        },
+        "product": { "type": "string" },
+        "label": { "type": "string" },
+        "did": { "type": "string", "format": "did" },
+        "role": {
+          "type": "string",
+          "knownValues": ["iot", "sidekar", "edge"]
+        }
+      }
+    },
+    "rollout": {
+      "type": "object",
+      "properties": {
+        "percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "salt": {
+          "type": "string"
+        }
+      }
+    },
+    "serviceWindow": {
+      "type": "object",
+      "required": ["timezone", "allowFrom", "allowTo"],
+      "properties": {
+        "timezone": { "type": "string" },
+        "allowFrom": {
+          "type": "string",
+          "description": "HH:MM 24h local to timezone"
+        },
+        "allowTo": {
+          "type": "string",
+          "description": "HH:MM 24h local to timezone"
+        },
+        "days": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 6
+          }
+        },
+        "urgentBypass": {
+          "type": "boolean",
+          "description": "If true, required priority may ignore the window"
+        },
+        "skewSec": {
+          "type": "integer",
+          "description": "Allowed clock skew seconds",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

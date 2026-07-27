@@ -1,0 +1,16 @@
+{
+  "name": "@open-firmware/iot-camera-emulator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/run.mjs",
+    "test:e2e": "node src/e2e.mjs"
+  },
+  "dependencies": {
+    "@open-firmware/iot": "workspace:*",
+    "@open-firmware/utility": "workspace:*",
+    "@open-firmware/core": "workspace:*",
+    "@open-firmware/client": "workspace:*"
+  }
+}

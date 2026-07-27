@@ -1,0 +1,130 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.firmware.release",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Root record for a signed software release (firmware, package, container, deployment, or bundle). Chunk payloads follow as reply-chained app.openfirmware.firmware.chunk records.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": [
+          "version",
+          "product",
+          "kind",
+          "createdAt",
+          "imageSha256",
+          "imageSize",
+          "chunkCount",
+          "channel",
+          "status"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "Semantic version (e.g. 1.0.0)"
+          },
+          "product": {
+            "type": "string",
+            "description": "Product or image id (e.g. sensor-x2, plex, sidekar)",
+            "maxLength": 128
+          },
+          "kind": {
+            "type": "string",
+            "description": "Artifact kind",
+            "knownValues": [
+              "firmware",
+              "package",
+              "container",
+              "deployment",
+              "bundle"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "imageSha256": {
+            "type": "string",
+            "description": "SHA-256 hex of the complete reassembled artifact",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "imageSize": {
+            "type": "integer",
+            "description": "Total artifact size in bytes",
+            "minimum": 0
+          },
+          "chunkCount": {
+            "type": "integer",
+            "description": "Expected number of chunk reply records",
+            "minimum": 0
+          },
+          "chunkSize": {
+            "type": "integer",
+            "description": "Default chunk size hint in bytes",
+            "minimum": 1
+          },
+          "mimeType": {
+            "type": "string",
+            "default": "application/octet-stream"
+          },
+          "channel": {
+            "type": "string",
+            "knownValues": ["stable", "beta", "dev"],
+            "default": "stable"
+          },
+          "status": {
+            "type": "string",
+            "description": "publishing = uploading chunks; awaiting_pipeline = waiting for CI/build/test acks; ready = installable; failed = pipeline or publish failed",
+            "knownValues": [
+              "publishing",
+              "awaiting_pipeline",
+              "ready",
+              "failed"
+            ]
+          },
+          "requirePipelineAcks": {
+            "type": "boolean",
+            "description": "If true, consumers should require requiredPipelineStages (or defaults) to have passed acks before treating ready as installable. If false, pipeline may be skipped.",
+            "default": false
+          },
+          "requiredPipelineStages": {
+            "type": "array",
+            "description": "Stages that must have result=passed (or skipped if policy allows). Empty + requirePipelineAcks=false means no CI gate.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pipelinePolicy": {
+            "type": "string",
+            "description": "How consumers enforce acks: strict = all required must pass; optional = acks informational only; skipped = publisher opted out",
+            "knownValues": ["strict", "optional", "skipped"],
+            "default": "skipped"
+          },
+          "changelog": {
+            "type": "string",
+            "maxLength": 10000
+          },
+          "minClientVersion": {
+            "type": "string",
+            "description": "Minimum client/sidekar library semver"
+          },
+          "platform": {
+            "type": "string",
+            "description": "Optional platform (e.g. linux/arm64, esp32)"
+          },
+          "ociDigest": {
+            "type": "string",
+            "description": "Optional OCI content digest for container kind"
+          },
+          "runtime": {
+            "type": "string",
+            "description": "Preferred apply runtime",
+            "knownValues": ["iot", "sidekar", "any"]
+          }
+        }
+      }
+    }
+  }
+}

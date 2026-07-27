@@ -1,0 +1,42 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.fleet.policy",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Default fleet policy for auto-update, size limits, and windows.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["updatedAt"],
+        "properties": {
+          "autoUpdate": {
+            "type": "boolean",
+            "default": true
+          },
+          "maxImageBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "defaultChannel": {
+            "type": "string",
+            "knownValues": ["stable", "beta", "dev"]
+          },
+          "defaultServiceWindow": {
+            "type": "ref",
+            "ref": "app.openfirmware.fleet.updateOffer#serviceWindow"
+          },
+          "requireSeal": {
+            "type": "boolean",
+            "description": "If true, clients require release status ready and/or seal",
+            "default": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

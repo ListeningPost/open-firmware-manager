@@ -1,0 +1,71 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.firmware.chunk",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "One content-addressed piece of a release, linked as a reply in the author-signed chain.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "reply",
+          "seq",
+          "blob",
+          "sha256",
+          "byteOffset",
+          "byteLength",
+          "createdAt"
+        ],
+        "properties": {
+          "reply": {
+            "type": "ref",
+            "ref": "#replyRef"
+          },
+          "seq": {
+            "type": "integer",
+            "description": "0-based chunk index",
+            "minimum": 0
+          },
+          "blob": {
+            "type": "blob",
+            "accept": ["*/*"],
+            "maxSize": 5242880
+          },
+          "sha256": {
+            "type": "string",
+            "description": "SHA-256 hex of chunk payload bytes",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "byteOffset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "byteLength": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    },
+    "replyRef": {
+      "type": "object",
+      "required": ["root", "parent"],
+      "properties": {
+        "root": {
+          "type": "ref",
+          "ref": "com.atproto.repo.strongRef"
+        },
+        "parent": {
+          "type": "ref",
+          "ref": "com.atproto.repo.strongRef"
+        }
+      }
+    }
+  }
+}

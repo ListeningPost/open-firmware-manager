@@ -1,0 +1,25 @@
+{
+  "name": "@open-firmware/server",
+  "version": "0.1.0",
+  "description": "Private control plane: join approval, sealed jobs, device inventory",
+  "license": "Apache-2.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js",
+    "dev": "node --import tsx src/index.ts",
+    "test": "echo \"covered by iot e2e\""
+  },
+  "dependencies": {
+    "@open-firmware/iot": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

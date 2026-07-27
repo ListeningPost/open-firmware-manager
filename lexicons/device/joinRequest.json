@@ -1,0 +1,28 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.device.joinRequest",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Public join request mirror (optional). Primary join path may use the private control plane.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["product", "fingerprint", "ed25519PublicKey", "createdAt", "status"],
+        "properties": {
+          "product": { "type": "string" },
+          "serial": { "type": "string" },
+          "fingerprint": { "type": "string" },
+          "mnemonic": { "type": "string" },
+          "ed25519PublicKey": { "type": "string" },
+          "x25519PublicKey": { "type": "string" },
+          "createdAt": { "type": "string", "format": "datetime" },
+          "status": {
+            "type": "string",
+            "knownValues": ["pending", "approved", "denied"]
+          }
+        }
+      }
+    }
+  }
+}

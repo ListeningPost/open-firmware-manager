@@ -1,0 +1,49 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.device.capabilities",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "What kinds of artifacts this node can apply and optional resource limits.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["kinds", "runtime", "updatedAt"],
+        "properties": {
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "knownValues": [
+                "firmware",
+                "package",
+                "container",
+                "deployment",
+                "bundle"
+              ]
+            }
+          },
+          "runtime": {
+            "type": "string",
+            "knownValues": ["iot", "sidekar", "edge"]
+          },
+          "arch": {
+            "type": "string"
+          },
+          "maxImageBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "docker": {
+            "type": "boolean",
+            "description": "True only for Sidekar/host agents with Docker apply support"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

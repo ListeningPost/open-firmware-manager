@@ -1,0 +1,48 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.fleet.enrollment",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Fleet-side enrollment of a device DID or Sidekar host DID.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["deviceDid", "product", "enrolledAt"],
+        "properties": {
+          "deviceDid": {
+            "type": "string",
+            "format": "did"
+          },
+          "product": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "knownValues": ["iot", "sidekar", "edge"]
+          },
+          "labels": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "channel": {
+            "type": "string",
+            "knownValues": ["stable", "beta", "dev"]
+          },
+          "autoUpdate": {
+            "type": "boolean",
+            "default": true
+          },
+          "enrolledAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        }
+      }
+    }
+  }
+}

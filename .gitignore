@@ -1,0 +1,18 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+.turbo/
+.vite/
+tmp/
+.pnpm-store/
+
+# Rust
+cli/target/
+examples/full-stack/pds.secrets.env
+examples/full-stack/.local/

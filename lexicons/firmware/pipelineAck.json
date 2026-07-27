@@ -1,0 +1,63 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.firmware.pipelineAck",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Intermediate pipeline acknowledgment (build, test, scan, etc.) linked to a release. Optional gate before status becomes ready.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["release", "stage", "result", "createdAt"],
+        "properties": {
+          "release": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong ref to the firmware.release root"
+          },
+          "stage": {
+            "type": "string",
+            "description": "Pipeline stage name",
+            "knownValues": [
+              "build",
+              "test",
+              "lint",
+              "security_scan",
+              "sign",
+              "promote",
+              "custom"
+            ]
+          },
+          "stageId": {
+            "type": "string",
+            "description": "Optional free-form stage id when stage=custom"
+          },
+          "result": {
+            "type": "string",
+            "knownValues": ["passed", "failed", "skipped"]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "runUrl": {
+            "type": "string",
+            "description": "CI run URL"
+          },
+          "commit": {
+            "type": "string",
+            "description": "Git commit SHA if applicable"
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "actor": {
+            "type": "string",
+            "description": "Optional DID or CI identity label of who attested"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@open-firmware/fleet",
+  "version": "0.1.0",
+  "description": "Shared fleet policy and selector helpers",
+  "license": "Apache-2.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "echo \"fleet scaffold\"",
+    "typecheck": "echo \"fleet scaffold\"",
+    "test": "echo \"fleet scaffold\""
+  },
+  "dependencies": {
+    "@open-firmware/core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

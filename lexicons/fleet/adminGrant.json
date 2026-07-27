@@ -1,0 +1,42 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.fleet.adminGrant",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Grants a utility/admin DID permission to intervene on this fleet.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["adminDid", "createdAt"],
+        "properties": {
+          "adminDid": {
+            "type": "string",
+            "format": "did"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "knownValues": [
+                "offers",
+                "enrollment",
+                "quarantine",
+                "analytics",
+                "all"
+              ]
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        }
+      }
+    }
+  }
+}
