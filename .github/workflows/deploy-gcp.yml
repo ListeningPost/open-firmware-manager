@@ -52,7 +52,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build server package
-        run: pnpm --filter @open-firmware/server build
+        run: pnpm --filter @open-firmware/iot build && pnpm --filter @open-firmware/server build
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
