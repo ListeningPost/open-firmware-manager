@@ -20,6 +20,8 @@
 5. **Phase A always on** — never skip audit  
 6. **Monitoring**: Sidekar state file / logs; optional fleet status records later  
 
+For the private control-plane server, the repo also includes a Cloud Run deployment workflow in [docs/gcp-cloud-run.md](./gcp-cloud-run.md).
+
 ## Environment variables (Sidekar)
 
 | Variable | Description |

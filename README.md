@@ -62,6 +62,10 @@ ofw publish \
 
 GitHub Actions: `cli/examples/github-actions-publish.yml`.
 
+## GCP deploy
+
+To deploy the control-plane server on GCP with GitHub Actions, see [docs/gcp-cloud-run.md](./docs/gcp-cloud-run.md).
+
 ## IoT management (join / password / factory reset)
 
 ```bash
