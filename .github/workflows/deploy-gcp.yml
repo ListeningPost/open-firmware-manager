@@ -87,8 +87,6 @@ jobs:
           push: true
           tags: ${{ steps.image.outputs.image_uri }}
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Deploy to Cloud Run
         run: |
