@@ -22,6 +22,8 @@
 
 For the private control-plane server, the repo also includes a Cloud Run deployment workflow in [docs/gcp-cloud-run.md](./gcp-cloud-run.md).
 
+The Cloud Run deployment is private by default. Test it from the staging network path or a VPC-connected VM, not from the public `a.run.app` URL.
+
 ## Environment variables (Sidekar)
 
 | Variable | Description |

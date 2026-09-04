@@ -27,6 +27,7 @@ env:
   REGION: ${{ vars.GCP_REGION }}
   REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
   SERVICE: ${{ vars.GCP_CLOUD_RUN_SERVICE }}
+  RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
   IMAGE_NAME: open-firmware-server
 
 jobs:
@@ -95,5 +96,7 @@ jobs:
             --region "${REGION}" \
             --platform managed \
             --image "${{ steps.image.outputs.image_uri }}" \
+            --service-account "${RUNTIME_SERVICE_ACCOUNT}" \
+            --no-allow-unauthenticated \
             --port 8787 \
             --set-env-vars "DATA_FILE=/tmp/control-store.json"

@@ -66,6 +66,8 @@ GitHub Actions: `cli/examples/github-actions-publish.yml`.
 
 To deploy the control-plane server on GCP with GitHub Actions, see [docs/gcp-cloud-run.md](./docs/gcp-cloud-run.md).
 
+The Cloud Run service is configured for private access. Test it from the internal network path used by your staging environment, not from the public `a.run.app` URL.
+
 ## IoT management (join / password / factory reset)
 
 ```bash
