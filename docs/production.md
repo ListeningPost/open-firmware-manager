@@ -24,6 +24,8 @@ For the private control-plane server, the repo also includes a Cloud Run deploym
 
 The Cloud Run deployment is private by default. Test it from the staging network path or a VPC-connected VM, not from the public `a.run.app` URL.
 
+If you want test VMs to join Tailscale automatically, use a startup script that installs Tailscale, joins the tailnet with an auth key, and advertises a tag such as `tag:gcp`.
+
 ## Environment variables (Sidekar)
 
 | Variable | Description |

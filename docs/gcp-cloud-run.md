@@ -93,6 +93,7 @@ gcloud compute ssh "$VM" \
 	--tunnel-through-iap
 
 curl -i http://YOUR_INTERNAL_STAGING_HOST/healthz
+```
 
 Clean up the temporary resources when you are done:
 
@@ -148,9 +149,37 @@ Clean up when done:
 
 ```bash
 gcloud compute instances delete "$VM" --project "$PROJECT_ID" --zone "$ZONE" --quiet
-gcloud compute networks subnets delete "$SUBNET" --region="$REGION" --quiet
-gcloud compute networks delete "$VPC" --quiet
+gcloud compute firewall-rules delete allow-iap-ssh-to-tmp-test --project "$PROJECT_ID" --quiet
+gcloud compute networks subnets delete "$SUBNET" --project "$PROJECT_ID" --region="$REGION" --quiet
+gcloud compute networks delete "$VPC" --project "$PROJECT_ID" --quiet
 ```
+
+## Tailscale auto-join for GCP VMs
+
+If you want GCP test VMs to join Tailscale automatically and carry a tag like `tag:gcp`, use a startup script plus a Tailscale auth key.
+
+Example startup script:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+curl -fsSL https://tailscale.com/install.sh | sh
+systemctl enable --now tailscaled
+
+tailscale up \
+	--auth-key="${TAILSCALE_AUTH_KEY}" \
+	--hostname="$(hostname)" \
+	--advertise-tags="tag:gcp" \
+	--accept-dns=true
+```
+
+Recommended pattern:
+
+- keep the Tailscale auth key in Secret Manager
+- inject it into the VM at boot via metadata or a startup-script wrapper
+- use a consistent tag such as `tag:gcp` or `tag:staging`
+- let the VM join Tailscale, then curl the internal staging endpoint from that VM
 
 ## Notes
 
