@@ -2,9 +2,10 @@
 name = "ofw"
 version = "0.1.0"
 edition = "2021"
-description = "Open Firmware CLI — publish cryptographically signed releases to an AT Protocol PDS"
+rust-version = "1.85"
+description = "Open Firmware CLI — publish content-addressed, optionally OEM-signed (Ed25519) releases to an AT Protocol PDS"
 license = "Apache-2.0"
-repository = "https://github.com/open-firmware/open-firmware"
+repository = "https://github.com/ListeningPost/open-firmware-manager"
 keywords = ["atproto", "firmware", "sidekar", "ota"]
 categories = ["command-line-utilities"]
 
@@ -15,17 +16,18 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive", "env"] }
 dialoguer = { version = "0.11", features = ["password"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 hex = "0.4"
 indicatif = "0.17"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-thiserror = "2"
-url = "2"
 
 [dev-dependencies]
-tempfile = "3"
+tiny_http = "0.12"
