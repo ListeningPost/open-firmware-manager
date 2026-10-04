@@ -20,11 +20,13 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/cli.js",
-    "test": "echo ok"
+    "test": "vitest run",
+    "clean": "rm -rf dist"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
   },
   "engines": {
     "node": ">=20"
