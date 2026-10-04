@@ -8,9 +8,23 @@ import { DEFAULT_PIPELINE_STAGES } from '../types/index.js'
 
 export interface PipelineAuditOptions {
   skipPipelineCheck?: boolean
+  /** Used only when the release itself declares no policy. */
   consumerDefaultPolicy?: PipelinePolicy
-  /** If set, acks whose authorDid is not in this list are ignored (not fatal). */
+  /**
+   * Consumer-side floor. The release record is publisher-controlled, so it can
+   * raise the policy above this but never lower it.
+   */
+  consumerMinPolicy?: PipelinePolicy
+  /** Consumer-side stage list; overrides the stages declared by the release. */
+  requiredStages?: string[]
+  /** If set, only acks written by one of these DIDs count. */
   attesterDids?: string[]
+}
+
+const POLICY_RANK: Record<PipelinePolicy, number> = {
+  skipped: 0,
+  optional: 1,
+  strict: 2,
 }
 
 export interface PipelineAuditReport {
@@ -36,9 +50,16 @@ export function resolvePipelinePolicy(
   opts: PipelineAuditOptions = {},
 ): PipelinePolicy {
   if (opts.skipPipelineCheck) return 'skipped'
-  if (release.pipelinePolicy) return release.pipelinePolicy
-  if (release.requirePipelineAcks) return 'strict'
-  return opts.consumerDefaultPolicy ?? 'skipped'
+  const raw: PipelinePolicy = release.pipelinePolicy
+    ? release.pipelinePolicy
+    : release.requirePipelineAcks
+      ? 'strict'
+      : (opts.consumerDefaultPolicy ?? 'skipped')
+  // Unknown policy strings from the record must not weaken the gate.
+  const declared: PipelinePolicy = raw in POLICY_RANK ? raw : 'strict'
+  const floor = opts.consumerMinPolicy
+  if (floor && POLICY_RANK[floor] > POLICY_RANK[declared]) return floor
+  return declared
 }
 
 export function resolveRequiredStages(
@@ -47,8 +68,10 @@ export function resolveRequiredStages(
     'requirePipelineAcks' | 'pipelinePolicy' | 'requiredPipelineStages'
   >,
   policy: PipelinePolicy,
+  opts: Pick<PipelineAuditOptions, 'requiredStages'> = {},
 ): string[] {
   if (policy === 'skipped') return []
+  if (opts.requiredStages?.length) return [...opts.requiredStages]
   if (policy === 'optional') {
     return release.requiredPipelineStages?.length
       ? [...release.requiredPipelineStages]
@@ -83,15 +106,18 @@ export function auditPipelineAcks(
 ): PipelineAuditReport {
   const issues: AuditIssue[] = []
   const policy = resolvePipelinePolicy(release, opts)
-  const requiredStages = resolveRequiredStages(release, policy)
+  const requiredStages = resolveRequiredStages(release, policy, opts)
 
   const relevant = acks.filter((ack) => {
     if (release.uri && ack.release?.uri && ack.release.uri !== release.uri) {
       return false
     }
+    // Acks are strongRefs: one issued for other bytes under the same URI
+    // must not cover this release.
+    if (release.cid && ack.release?.cid !== release.cid) return false
     if (opts.attesterDids?.length) {
       const did = ack.authorDid ?? ack.actor
-      if (did && !opts.attesterDids.includes(did)) return false
+      if (!did || !opts.attesterDids.includes(did)) return false
     }
     return true
   })

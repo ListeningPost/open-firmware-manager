@@ -273,6 +273,36 @@ export const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024
 /** Official Bluesky PDS blob upload limit. */
 export const MAX_BLOB_BYTES = 50 * 1024 * 1024
 
+/** Consumer-side cap on a release image when no explicit limit is configured. */
+export const DEFAULT_MAX_IMAGE_BYTES = 1024 * 1024 * 1024
+
+export const ARTIFACT_KINDS: readonly ArtifactKind[] = [
+  'firmware',
+  'package',
+  'container',
+  'deployment',
+  'bundle',
+]
+
+export function isArtifactKind(value: unknown): value is ArtifactKind {
+  return (
+    typeof value === 'string' &&
+    (ARTIFACT_KINDS as readonly string[]).includes(value)
+  )
+}
+
+/**
+ * True when a record-supplied product/version is safe to use as a single
+ * path segment: no separators, no "..", no leading dot, bounded length.
+ */
+export function isSafePathSegment(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$/.test(value) &&
+    !value.includes('..')
+  )
+}
+
 export const IOT_DEFAULT_KINDS: ArtifactKind[] = ['firmware', 'package']
 
 export const SIDEKAR_DEFAULT_KINDS: ArtifactKind[] = [

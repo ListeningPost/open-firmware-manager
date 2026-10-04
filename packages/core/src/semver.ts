@@ -25,3 +25,16 @@ export function mayApplyVersion(
   }
   return isNewerVersion(candidate, current)
 }
+
+/**
+ * Semver ordering for sort(): negative when a < b. Versions that do not
+ * coerce to semver sort before every valid version.
+ */
+export function compareVersions(a: string, b: string): number {
+  const va = semver.valid(semver.coerce(a))
+  const vb = semver.valid(semver.coerce(b))
+  if (!va && !vb) return 0
+  if (!va) return -1
+  if (!vb) return 1
+  return semver.compare(va, vb)
+}

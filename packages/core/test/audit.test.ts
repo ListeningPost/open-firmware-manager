@@ -137,4 +137,29 @@ describe('auditReleaseChain (Phase A)', () => {
     expect(bad.ok).toBe(false)
     expect(bad.issues.some((i) => i.code === 'OEM_SIG_INVALID')).toBe(true)
   })
+
+  it('requires a signature whenever trusted keys are configured', () => {
+    const { release, chunks } = releaseFromChunks(new Uint8Array(40).fill(3), 16)
+    const oem = generateOemKey()
+    const unsigned = auditReleaseChain(release, chunks, {
+      trustedOemKeys: [oem.publicKey],
+    })
+    expect(unsigned.ok).toBe(false)
+    expect(unsigned.issues.some((i) => i.code === 'OEM_SIG_MISSING')).toBe(true)
+  })
+
+  it('rejects a self-signed release when a signature is required but no keys are trusted', () => {
+    const { release, chunks } = releaseFromChunks(new Uint8Array(40).fill(3), 16)
+    const attacker = generateOemKey()
+    release.oemSignature = signRelease(
+      attacker.privateKeyPem,
+      release,
+      attacker.publicKey,
+    )
+    const report = auditReleaseChain(release, chunks, {
+      requireOemSignature: true,
+    })
+    expect(report.ok).toBe(false)
+    expect(report.issues.some((i) => i.code === 'OEM_SIG_INVALID')).toBe(true)
+  })
 })
