@@ -19,6 +19,7 @@ export { publisherClientMetadata, type OAuthClientMetadata } from './oauth.js'
 export {
   AtpClient,
   publicClient,
+  DEFAULT_MAX_BLOB_BYTES,
   type Session,
   type BlobRef,
   type StrongRef,

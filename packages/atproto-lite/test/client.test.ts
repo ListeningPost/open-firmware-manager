@@ -192,6 +192,52 @@ describe('AtpClient', () => {
   })
 })
 
+describe('getBlob size cap', () => {
+  it('returns the bytes when under the cap', async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(new Uint8Array([1, 2, 3]), { status: 200 })
+    const c = new AtpClient({ pds: 'http://pds.test', fetch: fetchImpl })
+    const got = await c.getBlob('did:plc:a', 'bafk', { maxBytes: 3 })
+    expect([...got]).toEqual([1, 2, 3])
+  })
+
+  it('rejects on an oversized Content-Length', async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        new ReadableStream({
+          pull(ctrl) {
+            ctrl.enqueue(new Uint8Array(8))
+            ctrl.close()
+          },
+        }),
+        { status: 200, headers: { 'content-length': '1000000' } },
+      )
+    const c = new AtpClient({ pds: 'http://pds.test', fetch: fetchImpl })
+    await expect(
+      c.getBlob('did:plc:a', 'bafk', { maxBytes: 16 }),
+    ).rejects.toMatchObject({ error: 'BlobTooLarge' })
+  })
+
+  it('stops streaming once the cap is exceeded when no length is declared', async () => {
+    let sent = 0
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        new ReadableStream({
+          pull(ctrl) {
+            sent++
+            ctrl.enqueue(new Uint8Array(10))
+          },
+        }),
+        { status: 200 },
+      )
+    const c = new AtpClient({ pds: 'http://pds.test', fetch: fetchImpl })
+    await expect(
+      c.getBlob('did:plc:a', 'bafk', { maxBytes: 25 }),
+    ).rejects.toMatchObject({ error: 'BlobTooLarge' })
+    expect(sent).toBeLessThan(10)
+  })
+})
+
 describe('blob CID', () => {
   it('is CIDv1 raw sha2-256', async () => {
     const cid = await blobCidFromBytes(new Uint8Array([1, 2, 3, 4]))
