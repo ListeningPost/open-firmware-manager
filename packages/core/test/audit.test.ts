@@ -162,4 +162,16 @@ describe('auditReleaseChain (Phase A)', () => {
     expect(report.ok).toBe(false)
     expect(report.issues.some((i) => i.code === 'OEM_SIG_INVALID')).toBe(true)
   })
+
+  it('rejects negative part lengths that would otherwise sum to imageSize', () => {
+    const { release, chunks } = releaseFromChunks(new Uint8Array(40).fill(3), 20)
+    chunks[0]!.byteLength = -1000
+    chunks[0]!.blobSize = undefined
+    chunks[1]!.byteOffset = -1000
+    chunks[1]!.byteLength = 1040
+    chunks[1]!.blobSize = undefined
+    const report = auditReleaseChain(release, chunks)
+    expect(report.ok).toBe(false)
+    expect(report.issues.some((i) => i.code === 'LAYOUT_INVALID')).toBe(true)
+  })
 })

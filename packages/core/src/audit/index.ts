@@ -61,6 +61,10 @@ export function auditReleaseChain(
     }
   }
 
+  if (!Number.isSafeInteger(release.imageSize) || release.imageSize < 0) {
+    push('SIZE_MISMATCH', `imageSize ${release.imageSize} is not a valid byte count`)
+  }
+
   if (release.chunkCount === 0) {
     if (release.imageSize !== 0) {
       push(
@@ -141,6 +145,13 @@ export function auditReleaseChain(
       push(
         c.sha256 ? 'DIGEST_INVALID' : 'DIGEST_MISSING',
         `part seq ${c.seq} has invalid or missing sha256`,
+        c.seq,
+      )
+    }
+    if (!Number.isSafeInteger(c.byteLength) || c.byteLength < 0) {
+      push(
+        'LAYOUT_INVALID',
+        `part seq ${c.seq} byteLength ${c.byteLength} is not a valid byte count`,
         c.seq,
       )
     }
