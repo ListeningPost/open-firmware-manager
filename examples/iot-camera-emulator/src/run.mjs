@@ -23,6 +23,29 @@ const ROOT = process.env.CAMERA_ROOT || path.join(__dirname, '..', 'data', 'came
 const CONTROL = process.env.OFW_CONTROL_URL || 'http://127.0.0.1:8787'
 const PRODUCT = process.env.PRODUCT || 'camera-x1'
 const SERIAL = process.env.SERIAL || 'EMU-001'
+// Fleet-wide secret held by the factory, never stored on the device.
+const FACTORY_SECRET = process.env.OFW_FACTORY_SECRET || undefined
+
+/**
+ * The control plane's job-signing key to pin. A real factory gets this out of
+ * band (OFW_CONTROL_PUBLIC_KEY, e.g. from `ofw-util control-key`); for the
+ * emulator we fall back to asking the control plane directly.
+ */
+async function controlPublicKey() {
+  if (process.env.OFW_CONTROL_PUBLIC_KEY) return process.env.OFW_CONTROL_PUBLIC_KEY
+  try {
+    const res = await fetch(`${CONTROL.replace(/\/$/, '')}/v1/meta`)
+    const meta = await res.json()
+    if (res.ok && typeof meta.controlPublicKey === 'string') return meta.controlPublicKey
+  } catch {
+    /* fall through */
+  }
+  console.warn(
+    'WARNING: control plane not reachable and OFW_CONTROL_PUBLIC_KEY not set — ' +
+      'the device will pin whatever key it sees at first enrollment',
+  )
+  return undefined
+}
 
 const [cmd] = process.argv.slice(2)
 
@@ -32,10 +55,13 @@ async function main() {
       product: PRODUCT,
       serial: SERIAL,
       controlEndpoint: CONTROL,
+      factorySecret: FACTORY_SECRET,
+      controlPublicKey: await controlPublicKey(),
     })
     console.log('Factory profile created:')
     console.log(JSON.stringify(publicIdentity(profile), null, 2))
     console.log('defaultPassword:', profile.defaultPassword)
+    console.log('pinned control key:', profile.controlPublicKey ?? '(none — pinned at first enrollment)')
     console.log('root:', ROOT)
     return
   }
@@ -77,8 +103,11 @@ async function main() {
         const st = await agent.refreshEnrollment()
         if (st.enrolled) {
           console.log('Enrolled — pulling jobs…')
-          const applied = await agent.pullAndApplyJobs()
-          if (applied.length) console.log('  applied jobs:', applied.join(', '))
+          for (const r of await agent.pullJobs()) {
+            if (r.replayed) continue
+            const note = r.rejected ? 'REJECTED' : r.status
+            console.log(`  job ${r.id || '(no id)'} ${r.kind}: ${note}${r.error ? ` — ${r.error}` : ''}`)
+          }
           const state = await agent.state()
           console.log(
             `  passwordRotated=${state.passwordRotated} firmware=${state.firmwareVersion}`,
