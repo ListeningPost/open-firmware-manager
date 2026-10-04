@@ -1,0 +1,8 @@
+dist/
+coverage/
+node_modules/
+pnpm-lock.yaml
+cli/target/
+examples/full-stack/.local/
+*.md
+lexicons/

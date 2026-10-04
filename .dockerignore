@@ -1,0 +1,13 @@
+.git
+.github
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+**/*.log
+cli/target
+docs
+examples/full-stack/.local
+examples/full-stack/pds.secrets.env
