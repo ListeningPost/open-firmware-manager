@@ -10,8 +10,8 @@ use std::path::PathBuf;
 pub fn run() -> Result<()> {
     let theme = ColorfulTheme::default();
     println!("Open Firmware — guided release");
-    println!("Publishes a cryptographically signed release chain to an AT Protocol PDS.");
-    println!("(The PDS is the distribution center. Sidekar pulls when status=ready.)\n");
+    println!("Publishes an immutable signed release to an AT Protocol PDS.");
+    println!("(The PDS is the distribution center. Sidekar follows the channel pointer.)\n");
 
     let pds: String = Input::with_theme(&theme)
         .with_prompt("PDS base URL")
@@ -25,7 +25,7 @@ pub fn run() -> Result<()> {
         .interact()?;
 
     println!("Logging in…");
-    let client = AtpClient::login(&pds, &identifier, &password)?;
+    let mut client = AtpClient::login(&pds, &identifier, &password)?;
     println!("Logged in as {} ({})", client.session.handle, client.session.did);
 
     let product: String = Input::with_theme(&theme)
@@ -102,6 +102,7 @@ pub fn run() -> Result<()> {
         platform: None,
         runtime,
         dry_run,
+        quiet: false,
         skip_pipeline: !require_pipeline,
         required_pipeline_stages: if require_pipeline {
             vec!["build".into(), "test".into()]
@@ -110,6 +111,6 @@ pub fn run() -> Result<()> {
         },
     };
 
-    publish(&client, &args)?;
+    publish(&mut client, &args)?;
     Ok(())
 }

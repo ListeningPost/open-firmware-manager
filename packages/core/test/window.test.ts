@@ -51,6 +51,22 @@ describe('isWithinServiceWindow', () => {
     expect(r.reason).toBe('urgent_bypass')
   })
 
+  it('honors skewSec at the window edge', () => {
+    const now = new Date('2026-07-27T01:50:00.000Z')
+    const blocked = isWithinServiceWindow({
+      window: { ...window, urgentBypass: false },
+      priority: 'recommended',
+      now,
+    })
+    expect(blocked.allowed).toBe(false)
+    const skewed = isWithinServiceWindow({
+      window: { ...window, urgentBypass: false, skewSec: 15 * 60 },
+      priority: 'recommended',
+      now,
+    })
+    expect(skewed.allowed).toBe(true)
+  })
+
   it('blocks wrong day of week', () => {
     // 2026-07-25 is Saturday
     const now = new Date('2026-07-25T02:30:00.000Z')

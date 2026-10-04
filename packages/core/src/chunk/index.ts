@@ -1,22 +1,25 @@
 import { sha256Hex } from '../hash/index.js'
-import type { ChunkPlan } from '../types/index.js'
+import {
+  DEFAULT_CHUNK_SIZE,
+  MAX_BLOB_BYTES,
+  type ChunkPlan,
+} from '../types/index.js'
 
 export interface ChunkFileOptions {
-  /** Chunk size in bytes. Default 512 KiB. */
+  /** Part size in bytes. Default 4 MiB. Capped at MAX_BLOB_BYTES. */
   chunkSize?: number
 }
 
-/**
- * Split a payload into ordered chunk plans with digests.
- * Pure / local — no network. Used by host publish and tests.
- */
 export function chunkBytes(
   data: Uint8Array,
   options: ChunkFileOptions = {},
 ): { chunks: ChunkPlan[]; imageSha256: string; imageSize: number } {
-  const chunkSize = options.chunkSize ?? 512 * 1024
+  let chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE
   if (chunkSize < 1) {
     throw new Error('chunkSize must be >= 1')
+  }
+  if (chunkSize > MAX_BLOB_BYTES) {
+    throw new Error(`chunkSize ${chunkSize} exceeds PDS blob cap ${MAX_BLOB_BYTES}`)
   }
 
   const imageSha256 = sha256Hex(data)
@@ -46,9 +49,6 @@ export function chunkBytes(
   return { chunks, imageSha256, imageSize }
 }
 
-/**
- * Reassemble chunk payloads in seq order and verify full-image digest.
- */
 export function assembleChunks(
   chunks: Array<{ seq: number; data: Uint8Array }>,
   expected?: { imageSha256?: string; imageSize?: number },

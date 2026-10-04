@@ -77,18 +77,20 @@ export class OpenFirmwareUtility {
     }) as Promise<{ id: string; summary: string }>
   }
 
-  pushFirmware(
+  offerFirmware(
     fingerprint: string,
-    opts: { version: string; firmwareBase64: string },
+    opts: { version: string; releaseUri: string; cid: string; imageSha256: string },
   ) {
     return this.req('/v1/jobs', {
       method: 'POST',
       body: JSON.stringify({
         fingerprint,
-        kind: 'firmware.apply',
+        kind: 'firmware.offer',
         payload: {
           version: opts.version,
-          firmwareBase64: opts.firmwareBase64,
+          releaseUri: opts.releaseUri,
+          cid: opts.cid,
+          imageSha256: opts.imageSha256,
         },
       }),
     }) as Promise<{ id: string; summary: string }>

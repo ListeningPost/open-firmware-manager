@@ -4,24 +4,23 @@
   "defs": {
     "main": {
       "type": "record",
-      "description": "Optional seal asserting a release chain is fully published and ready to install.",
+      "description": "Optional seal asserting a release is fully published. Strong-ref the immutable release CID.",
       "key": "tid",
       "record": {
         "type": "object",
-        "required": ["release", "chunkCount", "imageSha256", "createdAt"],
+        "required": ["release", "partCount", "imageSha256", "createdAt"],
         "properties": {
           "release": {
             "type": "ref",
             "ref": "com.atproto.repo.strongRef"
           },
-          "chunkCount": {
+          "partCount": {
             "type": "integer",
             "minimum": 0
           },
           "imageSha256": {
-            "type": "string",
-            "minLength": 64,
-            "maxLength": 64
+            "type": "ref",
+            "ref": "app.openfirmware.firmware.defs#sha256"
           },
           "createdAt": {
             "type": "string",

@@ -1,38 +1,46 @@
-import { AtpClient, publicClient } from '@open-firmware/atproto-lite'
+import {
+  AtpClient,
+  XRPCError,
+  blobCidFromBytes,
+  blobLink,
+  parseAtUri,
+  publicClient,
+} from '@open-firmware/atproto-lite'
 import {
   COLLECTIONS,
-  auditReleaseChain,
   assembleChunks,
+  auditReleaseChain,
+  channelRkey,
+  isReleaseInstallable,
+  mayApplyVersion,
   sha256Hex,
   sha256HexEqual,
-  mayApplyVersion,
-  isReleaseInstallable,
   type ArtifactKind,
   type ChainAuditReport,
   type ChunkMeta,
+  type GateState,
   type PipelineAckRecord,
   type ReleaseMeta,
 } from '@open-firmware/core'
-import { writeFile, mkdir } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 export interface ClientOptions {
-  /** Author / OEM PDS that hosts releases */
   pds: string
-  /** Author DID (repo) */
   authorDid: string
   trustedAuthors?: string[]
-  /**
-   * Force-skip pipeline/CI ack checks even when the release requires them.
-   * Default false.
-   */
+  trustedOemKeys?: string[]
+  requireOemSignature?: boolean
+  maxChannelAgeSec?: number
+  attesterDids?: string[]
+  fetch?: typeof fetch
+  /** Emergency only. Use OFW_CONSUMER_SKIP_PIPELINE, never OFW_SKIP_PIPELINE. */
   skipPipelineCheck?: boolean
 }
 
 export interface ResolveLatestOptions {
   product: string
   channel?: string
-  /** Also skip pipeline when selecting installable releases */
   skipPipelineCheck?: boolean
 }
 
@@ -40,10 +48,10 @@ export interface AuditOptions {
   freeSpaceBytes?: number
   requireReady?: boolean
   skipPipelineCheck?: boolean
+  probeBlobs?: boolean
 }
 
 export interface DownloadOptions extends AuditOptions {
-  /** Directory to write assembled artifact */
   outDir?: string
   outPath?: string
 }
@@ -59,226 +67,234 @@ export interface AppliedRelease {
   audit: ChainAuditReport
 }
 
-function cmpSemver(a: string, b: string): number {
-  const pa = a.split('.').map((x) => parseInt(x, 10) || 0)
-  const pb = b.split('.').map((x) => parseInt(x, 10) || 0)
-  for (let i = 0; i < 3; i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
-    if (d) return d
-  }
-  return 0
-}
-
-function blobCid(blob: unknown): string | undefined {
-  if (!blob || typeof blob !== 'object') return undefined
-  const b = blob as { ref?: { $link?: string } | string; size?: number }
-  if (typeof b.ref === 'string') return b.ref
-  return b.ref?.$link
-}
-
-/**
- * Production IoT/edge client — no Docker dependency.
- * Apply is always via caller-provided hooks.
- */
 export class OpenFirmwareClient {
   readonly pds: string
   readonly authorDid: string
   readonly trustedAuthors: Set<string>
+  readonly trustedOemKeys: string[]
+  readonly requireOemSignature: boolean
+  readonly maxChannelAgeSec?: number
+  readonly attesterDids?: string[]
   private readonly reader: AtpClient
-
   private readonly skipPipelineCheck: boolean
 
   constructor(opts: ClientOptions) {
     this.pds = opts.pds
     this.authorDid = opts.authorDid
     this.trustedAuthors = new Set(opts.trustedAuthors ?? [opts.authorDid])
-    this.reader = publicClient(opts.pds)
+    this.trustedOemKeys = opts.trustedOemKeys ?? []
+    this.requireOemSignature = opts.requireOemSignature ?? false
+    this.maxChannelAgeSec = opts.maxChannelAgeSec
+    this.attesterDids = opts.attesterDids
+    this.reader = publicClient(opts.pds, opts.fetch)
     this.skipPipelineCheck = opts.skipPipelineCheck ?? false
   }
 
   async listPipelineAcks(releaseUri: string): Promise<PipelineAckRecord[]> {
-    const records = await this.reader.listRecords(
-      this.authorDid,
-      COLLECTIONS.pipelineAck,
-      100,
-    )
-    return records
-      .filter((r) => {
-        const rel = r.value.release as { uri?: string } | undefined
-        return rel?.uri === releaseUri
-      })
-      .map((r) => ({
-        release: r.value.release as PipelineAckRecord['release'],
-        stage: String(r.value.stage),
-        stageId: r.value.stageId as string | undefined,
-        result: r.value.result as PipelineAckRecord['result'],
-        createdAt: String(r.value.createdAt),
-        runUrl: r.value.runUrl as string | undefined,
-        commit: r.value.commit as string | undefined,
-        summary: r.value.summary as string | undefined,
-        actor: r.value.actor as string | undefined,
-        uri: r.uri,
-        cid: r.cid,
-        authorDid: this.authorDid,
-      }))
+    const repos = new Set<string>([this.authorDid, ...(this.attesterDids ?? [])])
+    const out: PipelineAckRecord[] = []
+    for (const repo of repos) {
+      const records = await this.reader.listRecords(repo, COLLECTIONS.pipelineAck)
+      for (const r of records) {
+        const rel = r.value.release as { uri?: string; cid?: string } | undefined
+        if (rel?.uri !== releaseUri) continue
+        const authorDid = parseAtUri(r.uri).did
+        out.push({
+          release: r.value.release as PipelineAckRecord['release'],
+          stage: String(r.value.stage),
+          stageId: r.value.stageId as string | undefined,
+          result: r.value.result as PipelineAckRecord['result'],
+          createdAt: String(r.value.createdAt),
+          runUrl: r.value.runUrl as string | undefined,
+          commit: r.value.commit as string | undefined,
+          summary: r.value.summary as string | undefined,
+          actor: String(r.value.actor ?? authorDid),
+          uri: r.uri,
+          cid: r.cid,
+          authorDid,
+        })
+      }
+    }
+    return out
   }
 
   async resolveLatest(
     opts: ResolveLatestOptions,
+  ): Promise<{ uri: string; cid: string; value: Record<string, unknown> } | null> {
+    const channel = opts.channel ?? 'stable'
+    const skipPipe = opts.skipPipelineCheck ?? this.skipPipelineCheck
+    let pointer
+    try {
+      pointer = await this.reader.getRecord(
+        this.authorDid,
+        COLLECTIONS.channel,
+        channelRkey(opts.product, channel),
+      )
+    } catch (e) {
+      if (e instanceof XRPCError && e.isMissingRecord) return null
+      throw e
+    }
+    if (pointer.value.$type && pointer.value.$type !== COLLECTIONS.channel) {
+      throw new Error(`unexpected $type ${pointer.value.$type}`)
+    }
+    if (this.maxChannelAgeSec && typeof pointer.value.updatedAt === 'string') {
+      const age =
+        Date.now() - Date.parse(String(pointer.value.updatedAt))
+      const bound =
+        typeof pointer.value.maxAgeSec === 'number'
+          ? Number(pointer.value.maxAgeSec)
+          : this.maxChannelAgeSec
+      if (Number.isFinite(age) && age / 1000 > bound) {
+        throw new Error(`channel pointer is stale (${Math.round(age / 1000)}s)`)
+      }
+    }
+    const rel = pointer.value.release as { uri?: string; cid?: string }
+    if (!rel?.uri || !rel.cid) return null
+    const loaded = await this.loadRelease(rel.uri, rel.cid)
+    const acks = await this.listPipelineAcks(loaded.uri)
+    const gate = isReleaseInstallable(loaded.meta, acks, {
+      skipPipelineCheck: skipPipe,
+      attesterDids: this.attesterDids,
+    })
+    if (!gate.installable) return null
+    return { uri: loaded.uri, cid: loaded.cid, value: loaded.value }
+  }
+
+  async loadRelease(
+    releaseUri: string,
+    cid?: string,
   ): Promise<{
     uri: string
     cid: string
     value: Record<string, unknown>
-  } | null> {
-    const records = await this.reader.listRecords(
-      this.authorDid,
-      COLLECTIONS.release,
-      50,
-    )
-    const channel = opts.channel ?? 'stable'
-    const skipPipe =
-      opts.skipPipelineCheck ?? this.skipPipelineCheck
-    const candidates = records
-      .filter(
-        (r) =>
-          r.value.product === opts.product &&
-          r.value.channel === channel &&
-          r.value.status === 'ready',
-      )
-      .sort((a, b) =>
-        cmpSemver(String(b.value.version), String(a.value.version)),
-      )
-
-    for (const top of candidates) {
-      const meta: ReleaseMeta = {
-        version: String(top.value.version),
-        product: String(top.value.product),
-        kind: top.value.kind as ReleaseMeta['kind'],
-        imageSha256: String(top.value.imageSha256),
-        imageSize: Number(top.value.imageSize),
-        chunkCount: Number(top.value.chunkCount),
-        channel: top.value.channel as ReleaseMeta['channel'],
-        status: top.value.status as ReleaseMeta['status'],
-        authorDid: this.authorDid,
-        uri: top.uri,
-        cid: top.cid,
-        requirePipelineAcks: Boolean(top.value.requirePipelineAcks),
-        requiredPipelineStages: top.value.requiredPipelineStages as
-          | string[]
-          | undefined,
-        pipelinePolicy: top.value.pipelinePolicy as ReleaseMeta['pipelinePolicy'],
-      }
-      const acks = await this.listPipelineAcks(top.uri)
-      const gate = isReleaseInstallable(meta, acks, {
-        skipPipelineCheck: skipPipe,
-      })
-      if (gate.installable) return top
-    }
-    return null
-  }
-
-  async loadChain(releaseUri: string): Promise<{
-    release: ReleaseMeta
+    meta: ReleaseMeta
     chunks: ChunkMeta[]
-    releaseCid: string
   }> {
-    const records = await this.reader.listRecords(
-      this.authorDid,
-      COLLECTIONS.release,
-      50,
+    const parsed = parseAtUri(releaseUri)
+    if (!this.trustedAuthors.has(parsed.did)) {
+      throw new Error(`author ${parsed.did} not in trustedAuthors`)
+    }
+    const rec = await this.reader.getRecord(
+      parsed.did,
+      parsed.collection,
+      parsed.rkey,
+      cid,
     )
-    const rel = records.find((r) => r.uri === releaseUri)
-    if (!rel) throw new Error(`release not found: ${releaseUri}`)
-
-    if (!this.trustedAuthors.has(this.authorDid)) {
-      throw new Error(`author ${this.authorDid} not in trustedAuthors`)
+    if (rec.value.$type && rec.value.$type !== COLLECTIONS.release) {
+      throw new Error(`unexpected $type ${rec.value.$type}`)
+    }
+    const authorDid = parsed.did
+    let status: GateState = 'ready'
+    try {
+      const gate = await this.reader.getRecord(
+        authorDid,
+        COLLECTIONS.gate,
+        parsed.rkey,
+      )
+      status = String(gate.value.state) as GateState
+    } catch {
+      status = 'ready'
     }
 
-    const v = rel.value
-    const release: ReleaseMeta = {
-      version: String(v.version),
-      product: String(v.product),
-      kind: v.kind as ReleaseMeta['kind'],
-      imageSha256: String(v.imageSha256),
-      imageSize: Number(v.imageSize),
-      chunkCount: Number(v.chunkCount),
-      channel: v.channel as ReleaseMeta['channel'],
-      status: v.status as ReleaseMeta['status'],
-      authorDid: this.authorDid,
-      uri: rel.uri,
-      cid: rel.cid,
+    const parts = Array.isArray(rec.value.parts)
+      ? (rec.value.parts as Array<Record<string, unknown>>)
+      : []
+    const chunks: ChunkMeta[] = parts.map((p) => ({
+      seq: Number(p.seq),
+      sha256: String(p.sha256),
+      byteOffset: Number(p.byteOffset),
+      byteLength: Number(p.byteLength),
+      blobCid: blobLink(p.blob),
+      blobSize:
+        typeof (p.blob as { size?: number })?.size === 'number'
+          ? (p.blob as { size: number }).size
+          : undefined,
+      authorDid,
+    }))
+
+    const meta: ReleaseMeta = {
+      version: String(rec.value.version),
+      product: String(rec.value.product),
+      kind: rec.value.kind as ReleaseMeta['kind'],
+      imageSha256: String(rec.value.imageSha256),
+      imageSize: Number(rec.value.imageSize),
+      chunkCount: chunks.length,
+      channel: rec.value.channel as ReleaseMeta['channel'],
+      status,
+      authorDid,
+      uri: rec.uri,
+      cid: rec.cid,
+      requirePipelineAcks: Boolean(rec.value.requirePipelineAcks),
+      requiredPipelineStages: rec.value.requiredPipelineStages as
+        | string[]
+        | undefined,
+      pipelinePolicy: rec.value.pipelinePolicy as ReleaseMeta['pipelinePolicy'],
+      oemSignature: rec.value.oemSignature as ReleaseMeta['oemSignature'],
+      createdAt: rec.value.createdAt as string | undefined,
     }
 
-    const chunkRecs = await this.reader.listRecords(
-      this.authorDid,
-      COLLECTIONS.chunk,
-      100,
-    )
-    const chunks: ChunkMeta[] = chunkRecs
-      .filter((r) => {
-        const reply = r.value.reply as
-          | { root?: { uri?: string }; parent?: { uri?: string } }
-          | undefined
-        return reply?.root?.uri === releaseUri
-      })
-      .map((r) => {
-        const reply = r.value.reply as {
-          root?: { uri?: string }
-          parent?: { uri?: string }
-        }
-        return {
-          seq: Number(r.value.seq),
-          sha256: String(r.value.sha256),
-          byteOffset: Number(r.value.byteOffset),
-          byteLength: Number(r.value.byteLength),
-          blobCid: blobCid(r.value.blob),
-          blobSize:
-            typeof (r.value.blob as { size?: number })?.size === 'number'
-              ? (r.value.blob as { size: number }).size
-              : undefined,
-          authorDid: this.authorDid,
-          rootUri: reply.root?.uri,
-          parentUri: reply.parent?.uri,
-          uri: r.uri,
-          cid: r.cid,
-        }
-      })
-      .sort((a, b) => a.seq - b.seq)
-
-    return { release, chunks, releaseCid: rel.cid }
+    return { uri: rec.uri, cid: rec.cid, value: rec.value, meta, chunks }
   }
 
   async auditRelease(
     releaseUri: string,
     opts: AuditOptions = {},
   ): Promise<ChainAuditReport & { release: ReleaseMeta; chunks: ChunkMeta[] }> {
-    const { release, chunks } = await this.loadChain(releaseUri)
-    const availability: Record<string, { available: boolean; size?: number }> =
+    const loaded = await this.loadRelease(releaseUri)
+    const availability: Record<string, { available: boolean; size?: number; cid?: string }> =
       {}
-    for (const c of chunks) {
-      if (!c.blobCid) continue
-      try {
-        const bytes = await this.reader.getBlob(this.authorDid, c.blobCid)
-        availability[c.blobCid] = { available: true, size: bytes.byteLength }
-        ;(c as ChunkMeta & { _bytes?: Uint8Array })._bytes = bytes
-      } catch {
-        availability[c.blobCid] = { available: false }
+    if (opts.probeBlobs) {
+      for (const c of loaded.chunks) {
+        if (!c.blobCid) continue
+        try {
+          const bytes = await this.reader.getBlob(loaded.meta.authorDid, c.blobCid)
+          const cid = await blobCidFromBytes(bytes)
+          availability[c.blobCid] = {
+            available: true,
+            size: bytes.byteLength,
+            cid,
+          }
+        } catch {
+          availability[c.blobCid] = { available: false }
+        }
       }
     }
-    const report = auditReleaseChain(release, chunks, {
+    const report = auditReleaseChain(loaded.meta, loaded.chunks, {
       freeSpaceBytes: opts.freeSpaceBytes,
       requireReady: opts.requireReady ?? true,
-      requireBlobAvailability: true,
+      requireBlobAvailability: Boolean(opts.probeBlobs),
       blobAvailability: availability,
+      trustedOemKeys: this.trustedOemKeys,
+      requireOemSignature: this.requireOemSignature,
+      expectedType: COLLECTIONS.release,
+      recordType: loaded.value.$type as string | undefined,
     })
-    return { ...report, release, chunks }
+    return { ...report, release: loaded.meta, chunks: loaded.chunks }
   }
 
   async downloadVerified(
     releaseUri: string,
     opts: DownloadOptions = {},
   ): Promise<AppliedRelease> {
-    const audited = await this.auditRelease(releaseUri, opts)
+    const loaded = await this.loadRelease(releaseUri)
+    const skipPipe = opts.skipPipelineCheck ?? this.skipPipelineCheck
+    const acks = await this.listPipelineAcks(loaded.uri)
+    const gate = isReleaseInstallable(loaded.meta, acks, {
+      skipPipelineCheck: skipPipe,
+      attesterDids: this.attesterDids,
+    })
+    if (!gate.installable) {
+      throw new Error(`not installable: ${gate.reason}`)
+    }
+
+    const audited = auditReleaseChain(loaded.meta, loaded.chunks, {
+      freeSpaceBytes: opts.freeSpaceBytes,
+      requireReady: opts.requireReady ?? true,
+      trustedOemKeys: this.trustedOemKeys,
+      requireOemSignature: this.requireOemSignature,
+      expectedType: COLLECTIONS.release,
+      recordType: loaded.value.$type as string | undefined,
+    })
     if (!audited.ok) {
       const err = new Error(
         `Phase A failed: ${audited.issues.map((i) => i.code).join(', ')}`,
@@ -289,15 +305,17 @@ export class OpenFirmwareClient {
 
     const downloaded: Array<{ seq: number; data: Uint8Array }> = []
     for (const c of audited.chunks) {
-      const cached = (c as ChunkMeta & { _bytes?: Uint8Array })._bytes
-      const data =
-        cached ??
-        (await this.reader.getBlob(this.authorDid, c.blobCid!))
+      if (!c.blobCid) throw new Error(`part ${c.seq} missing blob CID`)
+      const data = await this.reader.getBlob(loaded.meta.authorDid, c.blobCid)
       if (data.byteLength !== c.byteLength) {
-        throw new Error(`chunk ${c.seq} length mismatch`)
+        throw new Error(`part ${c.seq} length mismatch`)
       }
       if (!sha256HexEqual(sha256Hex(data), c.sha256)) {
-        throw new Error(`chunk ${c.seq} digest mismatch`)
+        throw new Error(`part ${c.seq} digest mismatch`)
+      }
+      const cid = await blobCidFromBytes(data)
+      if (cid !== c.blobCid) {
+        throw new Error(`part ${c.seq} blob CID mismatch`)
       }
       downloaded.push({ seq: c.seq, data })
     }
@@ -328,9 +346,6 @@ export class OpenFirmwareClient {
     }
   }
 
-  /**
-   * If newer than currentVersion, audit+download. Returns null if nothing new.
-   */
   async pullIfNewer(
     opts: ResolveLatestOptions & {
       currentVersion?: string

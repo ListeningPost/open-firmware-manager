@@ -162,6 +162,9 @@ export class IotDeviceAgent {
           password?: string
           firmwareBase64?: string
           version?: string
+          releaseUri?: string
+          cid?: string
+          imageSha256?: string
         }
         await this.applyJob(payload)
         const ackTs = String(Date.now())
@@ -217,6 +220,9 @@ export class IotDeviceAgent {
     password?: string
     firmwareBase64?: string
     version?: string
+    releaseUri?: string
+    cid?: string
+    imageSha256?: string
   }): Promise<void> {
     const state = await this.state()
     const paths = devicePaths(this.root)
@@ -228,12 +234,15 @@ export class IotDeviceAgent {
       return
     }
     if (payload.kind === 'firmware.apply') {
-      if (!payload.firmwareBase64) throw new Error('firmware missing')
-      const buf = Buffer.from(payload.firmwareBase64, 'base64')
-      await writeFile(paths.firmwareImage, buf)
-      state.firmwareVersion = payload.version ?? 'unknown'
-      state.appliedFirmwareSha256 = createHash('sha256').update(buf).digest('hex')
-      await saveUserState(this.root, state)
+      throw new Error(
+        'unsigned firmware.apply is disabled; use firmware.offer + OpenFirmwareClient.downloadVerified',
+      )
+    }
+    if (payload.kind === 'firmware.offer') {
+      if (!payload.releaseUri || !payload.imageSha256) {
+        throw new Error('firmware.offer requires releaseUri and imageSha256')
+      }
+      // Signal only — bytes must be pulled with OpenFirmwareClient.downloadVerified.
       return
     }
     throw new Error(`unknown job kind ${payload.kind}`)

@@ -1,7 +1,7 @@
 /**
  * Generic pipeline / CI runner (NOT Sidekar).
  *
- * Watches the PDS for releases in awaiting_pipeline, simulates build+test,
+ * Watches the PDS for gates in awaiting-pipeline, simulates build+test,
  * and posts pipeline-ack records. Any external CI can do the same with ofw.
  *
  * Modes:
@@ -32,6 +32,8 @@ const HOST_PDS = process.env.HOST_PDS_URL || PDS_URL
 
 const COL_RELEASE = 'app.openfirmware.firmware.release'
 const COL_ACK = 'app.openfirmware.firmware.pipelineAck'
+const COL_GATE = 'app.openfirmware.firmware.gate'
+const COL_CHANNEL = 'app.openfirmware.firmware.channel'
 
 function log(...a) {
   console.log(new Date().toISOString(), '[pipeline-runner]', ...a)
@@ -48,15 +50,26 @@ function readAuthorDid() {
   }
 }
 
-async function listRecords(repo, collection, limit = 50) {
-  const u = new URL(`${PDS_URL}/xrpc/com.atproto.repo.listRecords`)
-  u.searchParams.set('repo', repo)
-  u.searchParams.set('collection', collection)
-  u.searchParams.set('limit', String(limit))
-  const res = await fetch(u)
-  if (!res.ok) throw new Error(`listRecords ${collection} ${res.status}`)
-  const j = await res.json()
-  return j.records || []
+async function listRecords(repo, collection) {
+  const out = []
+  let cursor
+  const seen = new Set()
+  for (let i = 0; i < 1000; i++) {
+    const u = new URL(`${PDS_URL}/xrpc/com.atproto.repo.listRecords`)
+    u.searchParams.set('repo', repo)
+    u.searchParams.set('collection', collection)
+    u.searchParams.set('limit', '100')
+    if (cursor) u.searchParams.set('cursor', cursor)
+    const res = await fetch(u)
+    if (!res.ok) throw new Error(`listRecords ${collection} ${res.status}`)
+    const j = await res.json()
+    out.push(...(j.records || []))
+    const next = j.cursor
+    if (!next || next === cursor || seen.has(next)) break
+    seen.add(next)
+    cursor = next
+  }
+  return out
 }
 
 function rkeyFromUri(uri) {
@@ -153,35 +166,57 @@ async function postAckViaXrpc(rkey, stage, result) {
     const r = latest.get(s)
     if (r !== 'passed' && r !== 'skipped') allOk = false
   }
-  if (result === 'failed') {
-    await fetch(`${PDS_URL}/xrpc/com.atproto.repo.putRecord`, {
+  async function putSidecar(collection, sidecarRkey, record) {
+    const existing = await fetch(
+      `${PDS_URL}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(sess.did)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(sidecarRkey)}`,
+    )
+    const prev = existing.ok ? await existing.json() : null
+    const body = {
+      repo: sess.did,
+      collection,
+      rkey: sidecarRkey,
+      record,
+    }
+    if (prev?.cid) body.swapRecord = prev.cid
+    const method = prev ? 'putRecord' : 'createRecord'
+    if (!prev) body.rkey = sidecarRkey
+    const r = await fetch(`${PDS_URL}/xrpc/com.atproto.repo.${method}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${sess.accessJwt}`,
       },
-      body: JSON.stringify({
-        repo: sess.did,
-        collection: COL_RELEASE,
-        rkey,
-        record: { ...rec.value, status: 'failed' },
-      }),
+      body: JSON.stringify(body),
+    })
+    if (!r.ok) throw new Error(`${method} ${collection} ${await r.text()}`)
+  }
+
+  if (result === 'failed') {
+    await putSidecar(COL_GATE, rkey, {
+      $type: COL_GATE,
+      release: { uri: rec.uri, cid: rec.cid },
+      state: 'failed',
+      updatedAt: new Date().toISOString(),
     })
     return 'failed'
   }
   if (allOk) {
-    await fetch(`${PDS_URL}/xrpc/com.atproto.repo.putRecord`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${sess.accessJwt}`,
-      },
-      body: JSON.stringify({
-        repo: sess.did,
-        collection: COL_RELEASE,
-        rkey,
-        record: { ...rec.value, status: 'ready' },
-      }),
+    await putSidecar(COL_GATE, rkey, {
+      $type: COL_GATE,
+      release: { uri: rec.uri, cid: rec.cid },
+      state: 'ready',
+      updatedAt: new Date().toISOString(),
+    })
+    const product = rec.value.product
+    const channel = rec.value.channel || 'stable'
+    const chRkey = `${product}-${channel}`.replace(/[^A-Za-z0-9._~-]+/g, '-')
+    await putSidecar(COL_CHANNEL, chRkey, {
+      $type: COL_CHANNEL,
+      product,
+      channel,
+      release: { uri: rec.uri, cid: rec.cid },
+      version: rec.value.version,
+      updatedAt: new Date().toISOString(),
     })
     return 'promoted'
   }
@@ -195,20 +230,25 @@ async function processOnce() {
     return 0
   }
 
-  const releases = await listRecords(authorDid, COL_RELEASE, 30)
-  const awaiting = releases.filter((r) => r.value?.status === 'awaiting_pipeline')
+  const gates = await listRecords(authorDid, COL_GATE)
+  const awaiting = gates.filter((g) => g.value?.state === 'awaiting-pipeline')
   if (!awaiting.length) {
-    log('no awaiting_pipeline releases')
+    log('no awaiting-pipeline gates')
     return 0
   }
 
   let n = 0
-  for (const rel of awaiting) {
-    const rkey = rkeyFromUri(rel.uri)
+  for (const gate of awaiting) {
+    const rkey = rkeyFromUri(gate.uri)
+    const relRes = await fetch(
+      `${PDS_URL}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(authorDid)}&collection=${encodeURIComponent(COL_RELEASE)}&rkey=${encodeURIComponent(rkey)}`,
+    )
+    if (!relRes.ok) continue
+    const rel = await relRes.json()
     const required = rel.value.requiredPipelineStages?.length
       ? rel.value.requiredPipelineStages
       : STAGES
-    const acks = await listRecords(authorDid, COL_ACK, 100)
+    const acks = await listRecords(authorDid, COL_ACK)
     const mine = acks.filter((a) => a.value?.release?.uri === rel.uri)
     const have = new Map()
     for (const a of mine) {

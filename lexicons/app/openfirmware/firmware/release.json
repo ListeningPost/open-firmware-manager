@@ -1,0 +1,125 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.firmware.release",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Immutable manifest for one product version. Payloads are PDS blobs listed in parts. Status lives on the gate sidecar and the channel pointer; do not mutate this record after create.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "version",
+          "product",
+          "kind",
+          "createdAt",
+          "imageSha256",
+          "imageSize",
+          "channel",
+          "parts"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "Semantic version (e.g. 1.0.0)",
+            "maxLength": 64
+          },
+          "product": {
+            "type": "string",
+            "description": "Stable product id",
+            "maxLength": 128
+          },
+          "kind": {
+            "type": "string",
+            "knownValues": [
+              "firmware",
+              "package",
+              "container",
+              "deployment",
+              "bundle"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "imageSha256": {
+            "type": "ref",
+            "ref": "app.openfirmware.firmware.defs#sha256"
+          },
+          "imageSize": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "chunkSize": {
+            "type": "integer",
+            "description": "Part size hint in bytes",
+            "minimum": 1,
+            "maximum": 52428800
+          },
+          "mimeType": {
+            "type": "string",
+            "maxLength": 128,
+            "default": "application/octet-stream"
+          },
+          "channel": {
+            "type": "string",
+            "knownValues": ["stable", "beta", "dev"],
+            "default": "stable"
+          },
+          "parts": {
+            "type": "array",
+            "description": "Ordered payload slices. Prefer one blob when the artifact fits the PDS blob limit.",
+            "maxLength": 512,
+            "items": {
+              "type": "ref",
+              "ref": "app.openfirmware.firmware.defs#part"
+            }
+          },
+          "requirePipelineAcks": {
+            "type": "boolean",
+            "default": false
+          },
+          "requiredPipelineStages": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "maxLength": 32
+          },
+          "pipelinePolicy": {
+            "type": "string",
+            "knownValues": ["strict", "optional", "skipped"],
+            "default": "skipped"
+          },
+          "changelog": {
+            "type": "string",
+            "maxLength": 2000,
+            "maxGraphemes": 2000
+          },
+          "minClientVersion": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "platform": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "ociDigest": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "runtime": {
+            "type": "string",
+            "knownValues": ["iot", "sidekar", "edge", "any"]
+          },
+          "oemSignature": {
+            "type": "ref",
+            "ref": "app.openfirmware.firmware.defs#oemSignature"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "client_id": "https://openfirmware.app/oauth-client-metadata.json",
+  "client_name": "Open Firmware",
+  "client_uri": "https://openfirmware.app",
+  "redirect_uris": ["https://openfirmware.app/oauth/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "scope": "atproto include:app.openfirmware.authPublisher blob:*/*",
+  "token_endpoint_auth_method": "none",
+  "dpop_bound_access_tokens": true,
+  "application_type": "web"
+}

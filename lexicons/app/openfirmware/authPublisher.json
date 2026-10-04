@@ -1,0 +1,42 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.authPublisher",
+  "defs": {
+    "main": {
+      "type": "permission-set",
+      "title": "Open Firmware publisher",
+      "detail": "Create and update Open Firmware releases, channel pointers, gates, pipeline acks, and the publisher declaration in this namespace.",
+      "permissions": [
+        {
+          "type": "permission",
+          "resource": "repo",
+          "collection": [
+            "app.openfirmware.firmware.release",
+            "app.openfirmware.firmware.channel",
+            "app.openfirmware.firmware.gate",
+            "app.openfirmware.firmware.pipelineAck",
+            "app.openfirmware.firmware.releaseSeal",
+            "app.openfirmware.actor.declaration",
+            "app.openfirmware.device.identity",
+            "app.openfirmware.device.status",
+            "app.openfirmware.device.capabilities",
+            "app.openfirmware.fleet.enrollment",
+            "app.openfirmware.fleet.policy",
+            "app.openfirmware.fleet.updateOffer",
+            "app.openfirmware.fleet.adminGrant"
+          ]
+        },
+        {
+          "type": "permission",
+          "resource": "rpc",
+          "inheritAud": true,
+          "lxm": [
+            "app.openfirmware.firmware.getLatest",
+            "app.openfirmware.firmware.listReleases",
+            "app.openfirmware.firmware.getRelease"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -2,7 +2,8 @@
 
 use sha2::{Digest, Sha256};
 
-pub const DEFAULT_CHUNK_SIZE: usize = 512 * 1024;
+pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+pub const MAX_BLOB_BYTES: usize = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ChunkPlan {
@@ -34,6 +35,9 @@ pub fn is_sha256_hex(s: &str) -> bool {
 pub fn chunk_bytes(data: &[u8], chunk_size: usize) -> anyhow::Result<ChunkedArtifact> {
     if chunk_size == 0 {
         anyhow::bail!("chunk_size must be >= 1");
+    }
+    if chunk_size > MAX_BLOB_BYTES {
+        anyhow::bail!("chunk_size {chunk_size} exceeds PDS blob cap {MAX_BLOB_BYTES}");
     }
     let image_sha256 = sha256_hex(data);
     let image_size = data.len() as u64;
@@ -98,9 +102,7 @@ pub fn assemble_chunks(
     Ok(out)
 }
 
-/// Deterministic release rkey per spec.
-pub fn release_rkey(product: &str, version: &str, channel: &str) -> String {
-    let raw = format!("{product}-{version}-{channel}");
+fn sanitize_rkey(raw: String) -> String {
     raw.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '-') {
@@ -110,6 +112,15 @@ pub fn release_rkey(product: &str, version: &str, channel: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Deterministic release rkey per spec.
+pub fn release_rkey(product: &str, version: &str, channel: &str) -> String {
+    sanitize_rkey(format!("{product}-{version}-{channel}"))
+}
+
+pub fn channel_rkey(product: &str, channel: &str) -> String {
+    sanitize_rkey(format!("{product}-{channel}"))
 }
 
 #[cfg(test)]

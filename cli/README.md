@@ -1,6 +1,6 @@
 # `ofw` — Open Firmware CLI (Rust)
 
-Production CLI to publish **cryptographically signed** release chains to an **AT Protocol PDS** (the distribution center).
+Production CLI to publish **immutable signed releases** (plus a channel pointer) to an **AT Protocol PDS** (the distribution center).
 
 ```bash
 cd cli && cargo install --path .
@@ -21,7 +21,7 @@ cd cli && cargo install --path .
 ```bash
 # 1) Upload bits; wait for CI messages
 ofw publish ... --require-pipeline --stages build,test --yes
-# status = awaiting_pipeline
+# gate = awaiting-pipeline
 
 # 2) From CI jobs:
 ofw pipeline-ack --rkey my-app-1.2.0-stable --stage build --result passed

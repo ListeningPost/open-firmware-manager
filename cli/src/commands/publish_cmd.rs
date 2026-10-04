@@ -58,7 +58,7 @@ pub struct PublishCmd {
     #[arg(long, default_value_t = true, env = "OFW_SKIP_PIPELINE")]
     pub skip_pipeline: bool,
 
-    /// Require CI pipeline (opposite of skip). Sets awaiting_pipeline until acks.
+    /// Require CI pipeline (opposite of skip). Sets gate awaiting-pipeline until acks.
     #[arg(long, default_value_t = false, env = "OFW_REQUIRE_PIPELINE")]
     pub require_pipeline: bool,
 
@@ -109,6 +109,7 @@ pub fn run(cmd: PublishCmd) -> Result<()> {
         platform: cmd.platform,
         runtime: cmd.runtime,
         dry_run: cmd.dry_run,
+        quiet: cmd.json,
         skip_pipeline,
         required_pipeline_stages: stages,
     };
@@ -117,13 +118,11 @@ pub fn run(cmd: PublishCmd) -> Result<()> {
         eprintln!("Tip: pass --yes for CI, or use `ofw release` for guided mode.");
     }
 
-    let client = AtpClient::login(&cmd.pds, &cmd.identifier, &cmd.password)?;
+    let mut client = AtpClient::login(&cmd.pds, &cmd.identifier, &cmd.password)?;
     // When --json, still run full publish but print only JSON on stdout
     // (progress logs go through println in publish — acceptable for now)
-    let res = publish(&client, &args)?;
+    let res = publish(&mut client, &args)?;
     if cmd.json {
-        // Emit a single trailing JSON object line for machine parsers
-        println!("---json---");
         println!("{}", serde_json::to_string(&result_json(&res))?);
     }
     Ok(())

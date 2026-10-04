@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot generic CI runner (NOT Sidekar): ack build+test for awaiting_pipeline releases.
+# One-shot generic CI runner (NOT Sidekar): ack build+test for awaiting-pipeline gates.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$(cd "${ROOT}/../.." && pwd)"

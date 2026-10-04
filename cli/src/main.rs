@@ -23,11 +23,12 @@ use commands::{audit_cmd, pipeline_cmd, publish_cmd, release_cmd};
 Commands:\n  \
   release         Guided wizard\n  \
   publish         Upload artifact (optionally await CI)\n  \
-  pipeline-ack    CI/build/test acknowledgment\n  \
-  pipeline-skip   Mark release ready without CI\n  \
-  audit           Phase A metadata audit\n\
+  pipeline-ack     CI/build/test acknowledgment (CI DID writes its own repo)\n  \
+  pipeline-promote Publisher reads CI acks and flips gate+channel\n  \
+  pipeline-skip    Mark release ready without CI\n  \
+  audit            Phase A metadata audit\n\
 \n\
-Pipeline: publish --require-pipeline → pipeline-ack build/test → ready.\n\
+Pipeline: publish --require-pipeline → CI pipeline-ack → pipeline-promote → ready.\n\
 Skip:     publish --skip-pipeline (default) → ready immediately."
 )]
 struct Cli {
@@ -49,6 +50,9 @@ enum Commands {
     /// Skip pipeline gate and mark release ready
     #[command(name = "pipeline-skip")]
     PipelineSkip(pipeline_cmd::SkipArgs),
+    /// Promote gate+channel after independent CI acks
+    #[command(name = "pipeline-promote")]
+    PipelinePromote(pipeline_cmd::PromoteArgs),
 }
 
 fn main() -> Result<()> {
@@ -62,6 +66,9 @@ fn main() -> Result<()> {
         }
         Commands::PipelineSkip(s) => {
             pipeline_cmd::run(pipeline_cmd::PipelineCmd::Skip(s))
+        }
+        Commands::PipelinePromote(p) => {
+            pipeline_cmd::run(pipeline_cmd::PipelineCmd::Promote(p))
         }
     }
 }

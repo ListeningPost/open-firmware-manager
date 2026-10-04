@@ -75,35 +75,48 @@ export function isWithinServiceWindow(input: WindowEvalInput): WindowEvalResult 
   }
 
   const now = input.now ?? new Date()
-  // skewSec reserved for future clock-tolerance expansion; window bounds are inclusive on allowFrom.
-  const parts = zonedParts(now, window.timezone)
   const from = parseHHMM(window.allowFrom)
   const to = parseHHMM(window.allowTo)
   if (!from || !to) {
-    // Invalid window config: fail closed except no_window already handled
     return { allowed: false, reason: 'outside_window' }
   }
 
-  if (window.days && window.days.length > 0 && !window.days.includes(parts.day)) {
+  const skewMs = (window.skewSec ?? 0) * 1000
+  const samples = skewMs
+    ? [new Date(now.getTime() - skewMs), now, new Date(now.getTime() + skewMs)]
+    : [now]
+
+  let anyWrongDay = false
+  for (const sample of samples) {
+    const parts = zonedParts(sample, window.timezone)
+    if (window.days && window.days.length > 0 && !window.days.includes(parts.day)) {
+      anyWrongDay = true
+      continue
+    }
+    const minutes = parts.hour * 60 + parts.minute
+    const fromM = from.h * 60 + from.m
+    const toM = to.h * 60 + to.m
+    let inWindow: boolean
+    if (fromM === toM) {
+      inWindow = true
+    } else if (fromM < toM) {
+      inWindow = minutes >= fromM && minutes < toM
+    } else {
+      inWindow = minutes >= fromM || minutes < toM
+    }
+    if (inWindow) {
+      return { allowed: true, reason: 'in_window' }
+    }
+  }
+
+  if (anyWrongDay && samples.length === 1) {
     return { allowed: false, reason: 'wrong_day' }
   }
-
-  const minutes = parts.hour * 60 + parts.minute
-  const fromM = from.h * 60 + from.m
-  const toM = to.h * 60 + to.m
-
-  let inWindow: boolean
-  if (fromM === toM) {
-    // Zero-width → treat as always (explicit 24h operators can use 00:00-24:00 style; we use equal = all day)
-    inWindow = true
-  } else if (fromM < toM) {
-    inWindow = minutes >= fromM && minutes < toM
-  } else {
-    // Overnight window e.g. 22:00 - 04:00
-    inWindow = minutes >= fromM || minutes < toM
+  if (window.days && window.days.length > 0) {
+    const parts = zonedParts(now, window.timezone)
+    if (!window.days.includes(parts.day) && !skewMs) {
+      return { allowed: false, reason: 'wrong_day' }
+    }
   }
-
-  return inWindow
-    ? { allowed: true, reason: 'in_window' }
-    : { allowed: false, reason: 'outside_window' }
+  return { allowed: false, reason: 'outside_window' }
 }

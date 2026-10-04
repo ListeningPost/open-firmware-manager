@@ -4,8 +4,8 @@
   "defs": {
     "main": {
       "type": "record",
-      "description": "What kinds of artifacts this node can apply and optional resource limits.",
-      "key": "literal:self",
+      "description": "What artifact kinds this node can apply. rkey is the device fingerprint in the fleet repo.",
+      "key": "any",
       "record": {
         "type": "object",
         "required": ["kinds", "runtime", "updatedAt"],
@@ -21,22 +21,23 @@
                 "deployment",
                 "bundle"
               ]
-            }
+            },
+            "maxLength": 16
           },
           "runtime": {
             "type": "string",
             "knownValues": ["iot", "sidekar", "edge"]
           },
           "arch": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 64
           },
           "maxImageBytes": {
             "type": "integer",
             "minimum": 0
           },
           "docker": {
-            "type": "boolean",
-            "description": "True only for Sidekar/host agents with Docker apply support"
+            "type": "boolean"
           },
           "updatedAt": {
             "type": "string",

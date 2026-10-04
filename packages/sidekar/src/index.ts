@@ -23,6 +23,9 @@ export interface SidekarConfig {
   /** Optional compose project directory to `docker compose up -d` after load */
   composeProjectDir?: string
   trustedAuthors?: string[]
+  trustedOemKeys?: string[]
+  /** CI attester DIDs whose pipelineAck records are required when set. */
+  attesterDids?: string[]
   /** Skip CI/pipeline ack enforcement when selecting releases */
   skipPipelineCheck?: boolean
 }
@@ -37,6 +40,21 @@ export interface SidekarState {
 
 function log(...args: unknown[]) {
   console.log(new Date().toISOString(), '-', ...args)
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms)
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(t)
+        resolve()
+      },
+      { once: true },
+    )
+  })
 }
 
 async function run(cmd: string, args: string[], cwd?: string): Promise<void> {
@@ -84,6 +102,8 @@ export class Sidekar {
       pds: config.pds,
       authorDid: config.authorDid,
       trustedAuthors: config.trustedAuthors ?? [config.authorDid],
+      trustedOemKeys: config.trustedOemKeys,
+      attesterDids: config.attesterDids,
       skipPipelineCheck: config.skipPipelineCheck ?? false,
     })
 
@@ -196,7 +216,7 @@ export class Sidekar {
       } catch (e) {
         log('tick error', e instanceof Error ? e.message : e)
       }
-      await new Promise((r) => setTimeout(r, this.config.pollIntervalMs))
+      await sleep(this.config.pollIntervalMs, signal)
     }
   }
 

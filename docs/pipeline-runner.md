@@ -14,12 +14,16 @@
 
 ```
 ofw publish --require-pipeline
-       → status: awaiting_pipeline
-pipeline-runner / GHA
-       → pipeline-ack build=passed, test=passed
-       → status: ready
-Sidekar
-       → install
+       → gate: awaiting-pipeline
+CI account (optional OFW_CI_*)
+       → ofw pipeline-ack --author-did <publisher>  (acks live in the CI repo)
+Publisher
+       → ofw pipeline-promote --attester-did <ci>
+       → gate: ready + channel pointer
+Sidekar (OFW_ATTESTER_DIDS=<ci>)
+       → getRecord(channel) → require CI acks → install
+
+If OFW_CI_* is unset, GHA acks with the publisher account (demo / single-identity).
 ```
 
 ## Skip
@@ -27,7 +31,7 @@ Sidekar
 ```
 ofw publish --skip-pipeline          # ready immediately
 ofw pipeline-skip --rkey …           # force ready later
-OFW_SKIP_PIPELINE=1 on Sidekar       # emergency consumer override
+OFW_CONSUMER_SKIP_PIPELINE=1 on Sidekar   # emergency consumer override (not OFW_SKIP_PIPELINE)
 ```
 
 ## Example stack

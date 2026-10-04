@@ -72,7 +72,7 @@ On the walkthrough page:
 1. Type a message (or keep the default).
 2. Click **Publish now (skip CI)** — release becomes `ready` immediately.
 3. Wait a few seconds — Sidekar installs and the front page message updates.
-4. Or click **Publish with CI gate** — status is `awaiting_pipeline` until the **pipeline-runner container** acks build+test, then Sidekar installs.
+4. Or click **Publish with CI gate** — status is `awaiting-pipeline` until the **pipeline-runner container** acks build+test, then Sidekar installs.
 
 You can also still use the CLI:
 
@@ -113,7 +113,7 @@ Sidekar only installs **newer** ready versions. Each publish should show up on t
 
 ```bash
 ./scripts/publish-with-pipeline.sh "Hello after tests"
-# status = awaiting_pipeline — watch counters/stages on http://localhost:8099
+# status = awaiting-pipeline — watch counters/stages on http://localhost:8099
 # compose service pipeline-runner auto-acks build+test (demo)
 # or: ./scripts/pipeline-runner-once.sh
 # then Sidekar installs when ready

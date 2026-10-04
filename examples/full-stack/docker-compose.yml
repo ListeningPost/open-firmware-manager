@@ -58,7 +58,7 @@ services:
     restart: "no"
 
   # ── Pipeline runner: generic CI/validator (NOT Sidekar) ─────────────
-  # Posts pipeline-ack for awaiting_pipeline releases. Replace with GHA/etc.
+  # Posts pipeline-ack for awaiting-pipeline gates. Replace with GHA/etc.
   pipeline-runner:
     build:
       context: ./services/pipeline-runner

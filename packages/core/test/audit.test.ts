@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { auditReleaseChain } from '../src/audit/index.js'
 import { chunkBytes } from '../src/chunk/index.js'
+import { generateOemKey, signRelease } from '../src/sign/index.js'
 import type { ChunkMeta, ReleaseMeta } from '../src/types/index.js'
 
 function releaseFromChunks(
@@ -25,26 +26,15 @@ function releaseFromChunks(
     ...overrides,
   }
 
-  const chunks: ChunkMeta[] = planned.chunks.map((c, i) => {
-    const uri = `at://did:plc:author/app.openfirmware.firmware.chunk/c${i}`
-    const prevUri =
-      i === 0 ? releaseUri : `at://did:plc:author/app.openfirmware.firmware.chunk/c${i - 1}`
-    return {
-      seq: c.seq,
-      sha256: c.sha256,
-      byteOffset: c.byteOffset,
-      byteLength: c.byteLength,
-      blobCid: `bafkchunk${i}`,
-      blobSize: c.byteLength,
-      authorDid: 'did:plc:author',
-      rootUri: releaseUri,
-      rootCid: 'bafyrelease',
-      parentUri: prevUri,
-      parentCid: i === 0 ? 'bafyrelease' : `bafychunk${i - 1}`,
-      uri,
-      cid: `bafychunk${i}`,
-    }
-  })
+  const chunks: ChunkMeta[] = planned.chunks.map((c) => ({
+    seq: c.seq,
+    sha256: c.sha256,
+    byteOffset: c.byteOffset,
+    byteLength: c.byteLength,
+    blobCid: `bafkchunk${c.seq}`,
+    blobSize: c.byteLength,
+    authorDid: 'did:plc:author',
+  }))
 
   return { release, chunks }
 }
@@ -64,22 +54,11 @@ describe('auditReleaseChain (Phase A)', () => {
   it('fails incomplete publish status', () => {
     const data = new Uint8Array(100).fill(1)
     const { release, chunks } = releaseFromChunks(data, 50, {
-      status: 'publishing',
+      status: 'awaiting-pipeline',
     })
     const report = auditReleaseChain(release, chunks)
     expect(report.ok).toBe(false)
-    expect(report.issues.some((i) => i.code === 'INCOMPLETE_PUBLISH')).toBe(
-      true,
-    )
-  })
-
-  it('fails broken parent chain', () => {
-    const data = new Uint8Array(100).fill(1)
-    const { release, chunks } = releaseFromChunks(data, 50)
-    chunks[1]!.parentUri = 'at://did:plc:author/app.openfirmware.firmware.chunk/WRONG'
-    const report = auditReleaseChain(release, chunks)
-    expect(report.ok).toBe(false)
-    expect(report.issues.some((i) => i.code === 'CHAIN_BROKEN')).toBe(true)
+    expect(report.issues.some((i) => i.code === 'INCOMPLETE_PUBLISH')).toBe(true)
   })
 
   it('fails count mismatch / seq gap', () => {
@@ -105,15 +84,23 @@ describe('auditReleaseChain (Phase A)', () => {
     const { release, chunks } = releaseFromChunks(data, 400)
     const report = auditReleaseChain(release, chunks, { freeSpaceBytes: 10 })
     expect(report.ok).toBe(false)
-    expect(report.issues.some((i) => i.code === 'INSUFFICIENT_SPACE')).toBe(
-      true,
-    )
+    expect(report.issues.some((i) => i.code === 'INSUFFICIENT_SPACE')).toBe(true)
   })
 
-  it('fails author mismatch on a chunk', () => {
+  it('fails author mismatch on a part', () => {
     const data = new Uint8Array(80).fill(3)
     const { release, chunks } = releaseFromChunks(data, 40)
     chunks[0]!.authorDid = 'did:plc:attacker'
+    const report = auditReleaseChain(release, chunks)
+    expect(report.ok).toBe(false)
+    expect(report.issues.some((i) => i.code === 'AUTHOR_MISMATCH')).toBe(true)
+  })
+
+  it('fails author mismatch from at-uri', () => {
+    const data = new Uint8Array(40).fill(3)
+    const { release, chunks } = releaseFromChunks(data, 40, {
+      uri: 'at://did:plc:other/app.openfirmware.firmware.release/r1',
+    })
     const report = auditReleaseChain(release, chunks)
     expect(report.ok).toBe(false)
     expect(report.issues.some((i) => i.code === 'AUTHOR_MISMATCH')).toBe(true)
@@ -126,10 +113,28 @@ describe('auditReleaseChain (Phase A)', () => {
       requireBlobAvailability: true,
       blobAvailability: {
         [chunks[0]!.blobCid!]: { available: true, size: chunks[0]!.byteLength },
-        // second blob missing
       },
     })
     expect(report.ok).toBe(false)
     expect(report.issues.some((i) => i.code === 'BLOB_UNAVAILABLE')).toBe(true)
+  })
+
+  it('verifies OEM signatures when required', () => {
+    const data = new Uint8Array(80).fill(9)
+    const { release, chunks } = releaseFromChunks(data, 40)
+    const oem = generateOemKey()
+    release.oemSignature = signRelease(oem.privateKeyPem, release, oem.publicKey)
+    const ok = auditReleaseChain(release, chunks, {
+      requireOemSignature: true,
+      trustedOemKeys: [oem.publicKey],
+    })
+    expect(ok.ok).toBe(true)
+
+    const bad = auditReleaseChain(release, chunks, {
+      requireOemSignature: true,
+      trustedOemKeys: ['not-a-key'],
+    })
+    expect(bad.ok).toBe(false)
+    expect(bad.issues.some((i) => i.code === 'OEM_SIG_INVALID')).toBe(true)
   })
 })

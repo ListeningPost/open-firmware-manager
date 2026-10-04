@@ -4,18 +4,19 @@
   "defs": {
     "main": {
       "type": "record",
-      "description": "Public join request mirror (optional). Primary join path may use the private control plane.",
+      "description": "Optional public join-request mirror. Primary join path is the private control plane; never put secrets or recovery material here.",
       "key": "tid",
       "record": {
         "type": "object",
         "required": ["product", "fingerprint", "ed25519PublicKey", "createdAt", "status"],
         "properties": {
-          "product": { "type": "string" },
-          "serial": { "type": "string" },
-          "fingerprint": { "type": "string" },
-          "mnemonic": { "type": "string" },
-          "ed25519PublicKey": { "type": "string" },
-          "x25519PublicKey": { "type": "string" },
+          "product": { "type": "string", "maxLength": 128 },
+          "fingerprint": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "ed25519PublicKey": { "type": "string", "maxLength": 64 },
           "createdAt": { "type": "string", "format": "datetime" },
           "status": {
             "type": "string",

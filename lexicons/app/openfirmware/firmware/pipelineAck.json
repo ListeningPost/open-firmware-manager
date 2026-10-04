@@ -4,25 +4,23 @@
   "defs": {
     "main": {
       "type": "record",
-      "description": "Intermediate pipeline acknowledgment (build, test, scan, etc.) linked to a release. Optional gate before status becomes ready.",
+      "description": "Pipeline/CI acknowledgment linked to a release. Independent attesters should write this in their own repo; consumers may be configured to require those DIDs.",
       "key": "tid",
       "record": {
         "type": "object",
-        "required": ["release", "stage", "result", "createdAt"],
+        "required": ["release", "stage", "result", "createdAt", "actor"],
         "properties": {
           "release": {
             "type": "ref",
-            "ref": "com.atproto.repo.strongRef",
-            "description": "Strong ref to the firmware.release root"
+            "ref": "com.atproto.repo.strongRef"
           },
           "stage": {
             "type": "string",
-            "description": "Pipeline stage name",
             "knownValues": [
               "build",
               "test",
               "lint",
-              "security_scan",
+              "security-scan",
               "sign",
               "promote",
               "custom"
@@ -30,7 +28,7 @@
           },
           "stageId": {
             "type": "string",
-            "description": "Optional free-form stage id when stage=custom"
+            "maxLength": 128
           },
           "result": {
             "type": "string",
@@ -42,11 +40,12 @@
           },
           "runUrl": {
             "type": "string",
-            "description": "CI run URL"
+            "format": "uri",
+            "maxLength": 2048
           },
           "commit": {
             "type": "string",
-            "description": "Git commit SHA if applicable"
+            "maxLength": 64
           },
           "summary": {
             "type": "string",
@@ -54,7 +53,7 @@
           },
           "actor": {
             "type": "string",
-            "description": "Optional DID or CI identity label of who attested"
+            "format": "did"
           }
         }
       }

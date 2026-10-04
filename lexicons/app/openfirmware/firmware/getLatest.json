@@ -1,0 +1,42 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.firmware.getLatest",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "AppView index of the latest ready release. Not a trust root — clients must fetch and verify the author repo record.",
+      "parameters": {
+        "type": "params",
+        "required": ["product"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "channel": {
+            "type": "string",
+            "knownValues": ["stable", "beta", "dev"]
+          },
+          "repo": {
+            "type": "string",
+            "format": "at-identifier"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["uri", "cid"],
+          "properties": {
+            "uri": { "type": "string", "format": "at-uri" },
+            "cid": { "type": "string", "format": "cid" },
+            "repo": { "type": "string", "format": "did" },
+            "version": { "type": "string" },
+            "channel": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

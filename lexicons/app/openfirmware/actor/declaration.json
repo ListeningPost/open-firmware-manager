@@ -1,0 +1,34 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.actor.declaration",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Publisher declaration so indexers (Tap/Jetstream/AppView) can discover accounts that publish Open Firmware. One per repo, rkey self.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["createdAt"],
+        "properties": {
+          "displayName": {
+            "type": "string",
+            "maxLength": 128,
+            "maxGraphemes": 64
+          },
+          "products": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "maxLength": 128
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

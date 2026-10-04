@@ -1,8 +1,8 @@
 # Open Firmware
 
-Production system for **cryptographically signed software distribution** over **AT Protocol**.
+Production system for **signed software distribution** over **AT Protocol**.
 
-The **distribution center is a PDS**. Publishers write signed release chains (records + blobs). Edge agents and Sidekar pull, audit, and apply.
+The **distribution center is a PDS**. Publishers write an **immutable** release record (`parts[]` blobs) plus a **channel pointer**. Edge agents and Sidekar `getRecord` the pointer, pin the CID, audit, and apply. Optional OEM Ed25519 is independent of PDS session keys.
 
 ## Products
 
@@ -20,12 +20,13 @@ The **distribution center is a PDS**. Publishers write signed release chains (re
 
 ## Trust model
 
-1. Author **DID + PDS commit signatures** authenticate records  
-2. Content digests (SHA-256) on release + chunks  
-3. **Phase A** validates the full chain before download  
-4. **Phase B** verifies blobs and full-image hash before apply  
+1. Author **DID** (from `at://`) + record/blob **CIDs**  
+2. Content digests (SHA-256) on the immutable release + each part  
+3. Optional **OEM Ed25519** over the canonical release tuple  
+4. **Phase A** validates metadata (no download)  
+5. **Phase B** verifies bytes, hex digest, and blob CID before apply  
 
-AppViews and dashboards are never the trust root.
+AppViews are an untrusted index, never the trust root.
 
 ## Quick start (guided walkthrough)
 

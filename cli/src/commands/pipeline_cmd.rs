@@ -1,6 +1,10 @@
-//! Post CI/build/test acknowledgments and promote releases.
+//! Post CI acknowledgments and promote the gate + channel sidecars.
 
-use crate::atproto::{AtpClient, COLLECTION_PIPELINE_ACK, COLLECTION_RELEASE};
+use crate::atproto::{
+    AtpClient, COLLECTION_CHANNEL, COLLECTION_GATE, COLLECTION_PIPELINE_ACK, COLLECTION_RELEASE,
+};
+use crate::chunk::channel_rkey;
+use crate::publish::upsert;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Args, Subcommand};
@@ -8,10 +12,9 @@ use serde_json::json;
 
 #[derive(Debug, Subcommand)]
 pub enum PipelineCmd {
-    /// Acknowledge a pipeline stage (build, test, …)
     Ack(AckArgs),
-    /// Skip remaining pipeline checks and mark release ready
     Skip(SkipArgs),
+    Promote(PromoteArgs),
 }
 
 #[derive(Debug, Args)]
@@ -22,15 +25,15 @@ pub struct AckArgs {
     pub identifier: String,
     #[arg(long, env = "OFW_PASSWORD")]
     pub password: String,
-    /// Release rkey (product-version-channel)
     #[arg(long)]
     pub rkey: String,
-    /// Stage name: build | test | lint | security_scan | sign | promote | custom
+    /// Publisher DID when CI is a different account (acks go in the CI repo).
+    #[arg(long, env = "OFW_AUTHOR_DID")]
+    pub author_did: Option<String>,
     #[arg(long)]
     pub stage: String,
     #[arg(long)]
     pub stage_id: Option<String>,
-    /// passed | failed | skipped
     #[arg(long)]
     pub result: String,
     #[arg(long)]
@@ -39,7 +42,6 @@ pub struct AckArgs {
     pub commit: Option<String>,
     #[arg(long)]
     pub summary: Option<String>,
-    /// Do not auto-promote to ready when all stages pass
     #[arg(long)]
     pub no_promote: bool,
     #[arg(long)]
@@ -60,10 +62,28 @@ pub struct SkipArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct PromoteArgs {
+    #[arg(long, env = "OFW_PDS")]
+    pub pds: String,
+    #[arg(long, env = "OFW_IDENTIFIER")]
+    pub identifier: String,
+    #[arg(long, env = "OFW_PASSWORD")]
+    pub password: String,
+    #[arg(long)]
+    pub rkey: String,
+    /// Comma-separated CI DIDs whose pipelineAck records are required.
+    #[arg(long = "attester-did", env = "OFW_ATTESTER_DIDS", value_delimiter = ',')]
+    pub attester_dids: Vec<String>,
+    #[arg(long)]
+    pub json: bool,
+}
+
 pub fn run(cmd: PipelineCmd) -> Result<()> {
     match cmd {
         PipelineCmd::Ack(a) => run_ack(a),
         PipelineCmd::Skip(s) => run_skip(s),
+        PipelineCmd::Promote(p) => run_promote(p),
     }
 }
 
@@ -72,9 +92,13 @@ fn run_ack(a: AckArgs) -> Result<()> {
     if !matches!(result.as_str(), "passed" | "failed" | "skipped") {
         anyhow::bail!("--result must be passed|failed|skipped");
     }
-    let client = AtpClient::login(&a.pds, &a.identifier, &a.password)?;
+    let mut client = AtpClient::login(&a.pds, &a.identifier, &a.password)?;
+    let author = a
+        .author_did
+        .clone()
+        .unwrap_or_else(|| client.session.did.clone());
     let rec = client
-        .get_record(COLLECTION_RELEASE, &a.rkey, Some(&client.session.did))
+        .get_record(COLLECTION_RELEASE, &a.rkey, Some(&author))
         .context("load release")?;
     let uri = rec
         .get("uri")
@@ -113,30 +137,55 @@ fn run_ack(a: AckArgs) -> Result<()> {
     }
 
     let ack_ref = client.create_record(COLLECTION_PIPELINE_ACK, ack, None)?;
-    println!("pipeline-ack recorded: {}", ack_ref.uri);
+    if !a.json {
+        eprintln!("pipeline-ack recorded: {}", ack_ref.uri);
+    }
 
+    let can_write_gate = author == client.session.did;
     if result == "failed" {
-        let mut v = value.clone();
-        v["status"] = json!("failed");
-        let r = client.put_record(COLLECTION_RELEASE, &a.rkey, v)?;
-        println!("release marked failed: {}", r.uri);
-    } else if !a.no_promote {
-        if let Some(promoted) = try_promote(&client, &a.rkey, &value, &uri)? {
-            println!("all required stages ok — promoted to ready: {}", promoted.uri);
+        if !can_write_gate {
+            if !a.json {
+                eprintln!("ack recorded in CI repo; publisher must fail the gate");
+            }
         } else {
-            println!("ack stored; still waiting for other stages (or already ready).");
+        upsert(
+            &mut client,
+            COLLECTION_GATE,
+            &a.rkey,
+            json!({
+                "$type": COLLECTION_GATE,
+                "release": { "uri": uri, "cid": cid },
+                "state": "failed",
+                "updatedAt": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "reason": format!("stage {} failed", a.stage),
+            }),
+        )?;
+        if !a.json {
+            eprintln!("gate marked failed");
+        }
+        }
+    } else if can_write_gate && !a.no_promote {
+        if try_promote(&mut client, &a.rkey, &value, &uri, &cid, &[])? {
+            if !a.json {
+                eprintln!("all required stages ok — gate ready + channel updated");
+            }
+        } else if !a.json {
+            eprintln!("ack stored; still waiting for other stages.");
         }
     }
 
     if a.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({
+            serde_json::to_string(&json!({
                 "ackUri": ack_ref.uri,
                 "ackCid": ack_ref.cid,
                 "rkey": a.rkey,
                 "stage": a.stage,
                 "result": result,
+                "actor": client.session.did,
+                "authorDid": author,
+                "promoted": can_write_gate && !a.no_promote,
             }))?
         );
     }
@@ -144,14 +193,13 @@ fn run_ack(a: AckArgs) -> Result<()> {
 }
 
 fn try_promote(
-    client: &AtpClient,
+    client: &mut AtpClient,
     rkey: &str,
     value: &serde_json::Value,
     release_uri: &str,
-) -> Result<Option<crate::atproto::StrongRef>> {
-    if value.get("status").and_then(|s| s.as_str()) == Some("ready") {
-        return Ok(None);
-    }
+    release_cid: &str,
+    attester_dids: &[String],
+) -> Result<bool> {
     let require = value
         .get("requirePipelineAcks")
         .and_then(|v| v.as_bool())
@@ -160,11 +208,6 @@ fn try_promote(
         .get("pipelinePolicy")
         .and_then(|v| v.as_str())
         .unwrap_or(if require { "strict" } else { "skipped" });
-    if policy == "skipped" || !require {
-        let mut v = value.clone();
-        v["status"] = json!("ready");
-        return Ok(Some(client.put_record(COLLECTION_RELEASE, rkey, v)?));
-    }
 
     let stages: Vec<String> = value
         .get("requiredPipelineStages")
@@ -176,76 +219,140 @@ fn try_promote(
         })
         .unwrap_or_else(|| vec!["build".into(), "test".into()]);
 
-    let listed = client.list_records(COLLECTION_PIPELINE_ACK, &client.session.did, 100)?;
-    let records = listed
-        .get("records")
-        .and_then(|r| r.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut latest: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    let mut items: Vec<_> = records
-        .iter()
-        .filter(|r| {
-            r.pointer("/value/release/uri")
-                .and_then(|u| u.as_str())
-                .map(|u| u == release_uri)
-                .unwrap_or(false)
-        })
-        .collect();
-    items.sort_by_key(|r| {
-        r.pointer("/value/createdAt")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string()
-    });
-    for r in items {
-        let stage = r
-            .pointer("/value/stage")
-            .and_then(|s| s.as_str())
-            .unwrap_or("");
-        let result = r
-            .pointer("/value/result")
-            .and_then(|s| s.as_str())
-            .unwrap_or("");
-        latest.insert(stage.to_string(), result.to_string());
-    }
-
-    for s in &stages {
-        let r = latest.get(s).map(|s| s.as_str()).unwrap_or("");
-        if r != "passed" && r != "skipped" {
-            return Ok(None);
+    if policy != "skipped" && require {
+        let repos: Vec<String> = if attester_dids.is_empty() {
+            vec![client.session.did.clone()]
+        } else {
+            attester_dids.to_vec()
+        };
+        let mut records = Vec::new();
+        for repo in &repos {
+            records.extend(client.list_records(COLLECTION_PIPELINE_ACK, repo)?);
+        }
+        let mut latest: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut items: Vec<_> = records
+            .iter()
+            .filter(|r| {
+                r.pointer("/value/release/uri")
+                    .and_then(|u| u.as_str())
+                    == Some(release_uri)
+            })
+            .collect();
+        items.sort_by_key(|r| {
+            r.pointer("/value/createdAt")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string()
+        });
+        for r in items {
+            let stage = r
+                .pointer("/value/stage")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let result = r
+                .pointer("/value/result")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            latest.insert(stage.to_string(), result.to_string());
+        }
+        for s in &stages {
+            let r = latest.get(s).map(|s| s.as_str()).unwrap_or("");
+            if r != "passed" && r != "skipped" {
+                return Ok(false);
+            }
         }
     }
 
-    let mut v = value.clone();
-    v["status"] = json!("ready");
-    Ok(Some(client.put_record(COLLECTION_RELEASE, rkey, v)?))
+    upsert(
+        client,
+        COLLECTION_GATE,
+        rkey,
+        json!({
+            "$type": COLLECTION_GATE,
+            "release": { "uri": release_uri, "cid": release_cid },
+            "state": "ready",
+            "updatedAt": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }),
+    )?;
+    let product = value.get("product").and_then(|v| v.as_str()).unwrap_or("");
+    let channel = value
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("stable");
+    let version = value.get("version").and_then(|v| v.as_str()).unwrap_or("");
+    upsert(
+        client,
+        COLLECTION_CHANNEL,
+        &channel_rkey(product, channel),
+        json!({
+            "$type": COLLECTION_CHANNEL,
+            "product": product,
+            "channel": channel,
+            "release": { "uri": release_uri, "cid": release_cid },
+            "version": version,
+            "updatedAt": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }),
+    )?;
+    Ok(true)
 }
 
 fn run_skip(s: SkipArgs) -> Result<()> {
-    let client = AtpClient::login(&s.pds, &s.identifier, &s.password)?;
-    let rec = client.get_record(COLLECTION_RELEASE, &s.rkey, Some(&client.session.did))?;
-    let mut value = rec
-        .get("value")
-        .cloned()
-        .context("release missing value")?;
-    value["status"] = json!("ready");
-    value["requirePipelineAcks"] = json!(false);
-    value["pipelinePolicy"] = json!("skipped");
-    let r = client.put_record(COLLECTION_RELEASE, &s.rkey, value)?;
-    println!("pipeline skipped — release ready: {}", r.uri);
+    let mut client = AtpClient::login(&s.pds, &s.identifier, &s.password)?;
+    let rec = client.get_record(COLLECTION_RELEASE, &s.rkey, Some(&client.session.did.clone()))?;
+    let uri = rec.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+    let cid = rec.get("cid").and_then(|v| v.as_str()).unwrap_or("");
+    let value = rec.get("value").cloned().context("release missing value")?;
+    try_promote(&mut client, &s.rkey, &value, uri, cid, &[])?;
+    if !s.json {
+        eprintln!("pipeline skipped — gate ready: {uri}");
+    }
     if s.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({
-                "uri": r.uri,
-                "cid": r.cid,
+            serde_json::to_string(&json!({
+                "uri": uri,
+                "cid": cid,
                 "rkey": s.rkey,
-                "status": "ready",
-                "pipelinePolicy": "skipped",
+                "gate": "ready",
             }))?
         );
+    }
+    Ok(())
+}
+
+fn run_promote(p: PromoteArgs) -> Result<()> {
+    let mut client = AtpClient::login(&p.pds, &p.identifier, &p.password)?;
+    let rec = client
+        .get_record(COLLECTION_RELEASE, &p.rkey, Some(&client.session.did.clone()))
+        .context("load release")?;
+    let uri = rec.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+    let cid = rec.get("cid").and_then(|v| v.as_str()).unwrap_or("");
+    let value = rec.get("value").cloned().context("release missing value")?;
+    let ok = try_promote(
+        &mut client,
+        &p.rkey,
+        &value,
+        uri,
+        cid,
+        &p.attester_dids,
+    )?;
+    if !ok {
+        anyhow::bail!("required pipeline acks not present yet");
+    }
+    if p.json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "uri": uri,
+                "cid": cid,
+                "rkey": p.rkey,
+                "gate": "ready",
+                "attesterDids": p.attester_dids,
+            }))?
+        );
+    } else {
+        eprintln!("promoted — gate ready + channel updated: {uri}");
     }
     Ok(())
 }

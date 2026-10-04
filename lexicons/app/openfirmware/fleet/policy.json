@@ -26,10 +26,18 @@
             "type": "ref",
             "ref": "app.openfirmware.fleet.updateOffer#serviceWindow"
           },
-          "requireSeal": {
+          "requireOemSignature": {
             "type": "boolean",
-            "description": "If true, clients require release status ready and/or seal",
-            "default": true
+            "default": false
+          },
+          "trustedOemKeys": {
+            "type": "array",
+            "items": { "type": "string", "maxLength": 64 },
+            "maxLength": 16
+          },
+          "maxChannelAgeSec": {
+            "type": "integer",
+            "minimum": 0
           },
           "updatedAt": {
             "type": "string",

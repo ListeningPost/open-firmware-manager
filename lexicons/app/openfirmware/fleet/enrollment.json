@@ -4,18 +4,24 @@
   "defs": {
     "main": {
       "type": "record",
-      "description": "Fleet-side enrollment of a device DID or Sidekar host DID.",
-      "key": "tid",
+      "description": "Fleet-side enrollment of a device. rkey is the device fingerprint.",
+      "key": "any",
       "record": {
         "type": "object",
-        "required": ["deviceDid", "product", "enrolledAt"],
+        "required": ["fingerprint", "product", "enrolledAt"],
         "properties": {
+          "fingerprint": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
           "deviceDid": {
             "type": "string",
             "format": "did"
           },
           "product": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 128
           },
           "role": {
             "type": "string",
@@ -23,7 +29,8 @@
           },
           "labels": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": { "type": "string", "maxLength": 64 },
+            "maxLength": 32
           },
           "channel": {
             "type": "string",

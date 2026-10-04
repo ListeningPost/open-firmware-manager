@@ -1,4 +1,5 @@
 import { isSha256Hex } from '../hash/index.js'
+import { verifyOemSignature } from '../sign/index.js'
 import type {
   AuditIssue,
   ChainAuditReport,
@@ -7,25 +8,19 @@ import type {
 } from '../types/index.js'
 
 export interface AuditOptions {
-  /** Free bytes on the target volume; if set, enforces preflight. */
   freeSpaceBytes?: number
-  /** Extra staging overhead added to required bytes (default 0). */
   stagingOverheadBytes?: number
-  /** Require release.status === 'ready'. Default true. */
+  /** Require gate state === 'ready'. Default true. */
   requireReady?: boolean
-  /**
-   * Optional map of blobCid → available size (from probes).
-   * Missing keys when probeBlobs was requested should be passed as availability flags separately.
-   */
-  blobAvailability?: Record<string, { available: boolean; size?: number }>
-  /** If true, missing availability entries count as BLOB_UNAVAILABLE when blobCid set. */
+  blobAvailability?: Record<string, { available: boolean; size?: number; cid?: string }>
   requireBlobAvailability?: boolean
+  /** If set, OEM signature is required and must match one of these keys. */
+  trustedOemKeys?: string[]
+  requireOemSignature?: boolean
+  expectedType?: string
+  recordType?: string
 }
 
-/**
- * Phase A: BitTorrent-style metadata integrity suite.
- * Does not download payload bodies — only validates the plan of the download.
- */
 export function auditReleaseChain(
   release: ReleaseMeta,
   chunks: ChunkMeta[],
@@ -40,15 +35,26 @@ export function auditReleaseChain(
     issues.push(seq === undefined ? { code, message } : { code, message, seq })
   }
 
+  if (options.expectedType && options.recordType && options.recordType !== options.expectedType) {
+    push('TYPE_MISMATCH', `record $type ${options.recordType} != ${options.expectedType}`)
+  }
+
   if (requireReady && release.status !== 'ready') {
     push(
       'INCOMPLETE_PUBLISH',
-      `release status is "${release.status}", expected "ready"`,
+      `gate state is "${release.status}", expected "ready"`,
     )
   }
 
   if (!isSha256Hex(release.imageSha256)) {
     push('DIGEST_INVALID', 'release.imageSha256 is not a 64-char hex SHA-256')
+  }
+
+  if (release.uri) {
+    const did = didFromAtUri(release.uri)
+    if (did && did !== release.authorDid) {
+      push('AUTHOR_MISMATCH', `release URI did ${did} != authorDid ${release.authorDid}`)
+    }
   }
 
   if (release.chunkCount === 0) {
@@ -61,7 +67,7 @@ export function auditReleaseChain(
     if (chunks.length !== 0) {
       push(
         'COUNT_MISMATCH',
-        `chunkCount is 0 but ${chunks.length} chunk(s) provided`,
+        `chunkCount is 0 but ${chunks.length} part(s) provided`,
       )
     }
   }
@@ -69,7 +75,7 @@ export function auditReleaseChain(
   if (chunks.length !== release.chunkCount) {
     push(
       'COUNT_MISMATCH',
-      `expected ${release.chunkCount} chunk(s), got ${chunks.length}`,
+      `expected ${release.chunkCount} part(s), got ${chunks.length}`,
     )
   }
 
@@ -90,6 +96,18 @@ export function auditReleaseChain(
     )
   }
 
+  if (options.requireOemSignature) {
+    if (!release.oemSignature) {
+      push('OEM_SIG_MISSING', 'OEM signature required by policy')
+    } else {
+      const v = verifyOemSignature(release, options.trustedOemKeys ?? [])
+      if (!v.ok) push('OEM_SIG_INVALID', v.reason ?? 'OEM signature invalid')
+    }
+  } else if (release.oemSignature && (options.trustedOemKeys?.length ?? 0) > 0) {
+    const v = verifyOemSignature(release, options.trustedOemKeys ?? [])
+    if (!v.ok) push('OEM_SIG_INVALID', v.reason ?? 'OEM signature invalid')
+  }
+
   const bySeq = new Map<number, ChunkMeta>()
   for (const c of chunks) {
     if (bySeq.has(c.seq)) {
@@ -103,32 +121,31 @@ export function auditReleaseChain(
   for (let seq = 0; seq < release.chunkCount; seq++) {
     const c = bySeq.get(seq)
     if (!c) {
-      push('SEQ_GAP', `missing chunk seq ${seq}`, seq)
+      push('SEQ_GAP', `missing part seq ${seq}`, seq)
       continue
     }
     ordered.push(c)
   }
 
-  // Author continuity + digests + blob size
   for (const c of ordered) {
     if (c.authorDid && c.authorDid !== release.authorDid) {
       push(
         'AUTHOR_MISMATCH',
-        `chunk seq ${c.seq} author ${c.authorDid} != release author ${release.authorDid}`,
+        `part seq ${c.seq} author ${c.authorDid} != release author ${release.authorDid}`,
         c.seq,
       )
     }
     if (!c.sha256 || !isSha256Hex(c.sha256)) {
       push(
         c.sha256 ? 'DIGEST_INVALID' : 'DIGEST_MISSING',
-        `chunk seq ${c.seq} has invalid or missing sha256`,
+        `part seq ${c.seq} has invalid or missing sha256`,
         c.seq,
       )
     }
     if (c.blobSize !== undefined && c.blobSize !== c.byteLength) {
       push(
         'BLOB_SIZE_MISMATCH',
-        `chunk seq ${c.seq} blob.size ${c.blobSize} != byteLength ${c.byteLength}`,
+        `part seq ${c.seq} blob.size ${c.blobSize} != byteLength ${c.byteLength}`,
         c.seq,
       )
     }
@@ -137,68 +154,38 @@ export function auditReleaseChain(
       if (!av?.available) {
         push(
           'BLOB_UNAVAILABLE',
-          `chunk seq ${c.seq} blob ${c.blobCid} not available`,
+          `part seq ${c.seq} blob ${c.blobCid} not available`,
           c.seq,
         )
       } else if (av.size !== undefined && av.size !== c.byteLength) {
         push(
           'BLOB_SIZE_MISMATCH',
-          `chunk seq ${c.seq} available size ${av.size} != byteLength ${c.byteLength}`,
+          `part seq ${c.seq} available size ${av.size} != byteLength ${c.byteLength}`,
+          c.seq,
+        )
+      }
+      if (av?.cid && c.blobCid && av.cid !== c.blobCid) {
+        push(
+          'BLOB_CID_MISMATCH',
+          `part seq ${c.seq} computed CID ${av.cid} != record ${c.blobCid}`,
           c.seq,
         )
       }
     }
   }
 
-  // Layout arithmetic + chain linkage when refs present
   let expectedOffset = 0
   let sumLengths = 0
-  for (let i = 0; i < ordered.length; i++) {
-    const c = ordered[i]!
+  for (const c of ordered) {
     sumLengths += c.byteLength
-
     if (c.byteOffset !== expectedOffset) {
       push(
         'LAYOUT_INVALID',
-        `chunk seq ${c.seq} byteOffset ${c.byteOffset} expected ${expectedOffset}`,
+        `part seq ${c.seq} byteOffset ${c.byteOffset} expected ${expectedOffset}`,
         c.seq,
       )
     }
     expectedOffset += c.byteLength
-
-    if (release.uri && c.rootUri && c.rootUri !== release.uri) {
-      push(
-        'CHAIN_BROKEN',
-        `chunk seq ${c.seq} root uri does not match release`,
-        c.seq,
-      )
-    }
-
-    if (i === 0) {
-      if (release.uri && c.parentUri && c.parentUri !== release.uri) {
-        push(
-          'CHAIN_BROKEN',
-          `chunk seq 0 parent should be release uri`,
-          0,
-        )
-      }
-    } else {
-      const prev = ordered[i - 1]!
-      if (c.parentUri && prev.uri && c.parentUri !== prev.uri) {
-        push(
-          'CHAIN_BROKEN',
-          `chunk seq ${c.seq} parent does not match previous chunk`,
-          c.seq,
-        )
-      }
-      if (c.parentCid && prev.cid && c.parentCid !== prev.cid) {
-        push(
-          'CHAIN_BROKEN',
-          `chunk seq ${c.seq} parent cid does not match previous chunk`,
-          c.seq,
-        )
-      }
-    }
   }
 
   if (ordered.length > 0 && sumLengths !== release.imageSize) {
@@ -209,7 +196,7 @@ export function auditReleaseChain(
   }
 
   if (release.chunkCount > 0 && ordered.length === 0) {
-    push('EMPTY_CHAIN', 'no valid chunks to form a download plan')
+    push('EMPTY_CHAIN', 'no valid parts to form a download plan')
   }
 
   return {
@@ -220,4 +207,26 @@ export function auditReleaseChain(
     requiredBytes,
     freeSpaceBytes: options.freeSpaceBytes,
   }
+}
+
+export function didFromAtUri(uri: string): string | null {
+  if (!uri.startsWith('at://')) return null
+  const rest = uri.slice('at://'.length)
+  const slash = rest.indexOf('/')
+  const did = slash === -1 ? rest : rest.slice(0, slash)
+  return did.startsWith('did:') ? did : null
+}
+
+export function parseAtUri(
+  uri: string,
+): { did: string; collection: string; rkey: string } | null {
+  if (!uri.startsWith('at://')) return null
+  const rest = uri.slice('at://'.length)
+  const parts = rest.split('/')
+  if (parts.length < 3) return null
+  const did = parts[0]!
+  const collection = parts[1]!
+  const rkey = parts.slice(2).join('/')
+  if (!did.startsWith('did:') || !collection || !rkey) return null
+  return { did, collection, rkey }
 }

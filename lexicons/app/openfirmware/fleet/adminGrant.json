@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "record",
-      "description": "Grants a utility/admin DID permission to intervene on this fleet.",
+      "description": "Grants a utility/admin DID permission to intervene on this fleet. Recorded for audit; enforcement is the fleet operator's PDS write ACL plus this allow-list.",
       "key": "tid",
       "record": {
         "type": "object",
@@ -25,7 +25,8 @@
                 "analytics",
                 "all"
               ]
-            }
+            },
+            "maxLength": 8
           },
           "createdAt": {
             "type": "string",

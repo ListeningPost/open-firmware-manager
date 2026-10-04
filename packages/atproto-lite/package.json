@@ -16,12 +16,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo \"no tests yet\"",
+    "test": "vitest run",
     "clean": "rm -rf dist"
   },
   "devDependencies": {
     "typescript": "^5.7.3",
-    "@types/node": "^22.10.7"
+    "@types/node": "^22.10.7",
+    "vitest": "^3.0.5"
   },
   "engines": {
     "node": ">=20"

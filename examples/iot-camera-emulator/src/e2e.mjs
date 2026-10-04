@@ -114,24 +114,48 @@ async function main() {
     }
     console.log('✓ sealed password job applied')
 
-    // Synthetic firmware as sealed job
+    // Unsigned firmware.apply is rejected by the control plane
+    let rejected = false
+    try {
+      await util.offerFirmware(fp, {
+        version: '3.1.0',
+        releaseUri: 'at://did:plc:test/app.openfirmware.firmware.release/x',
+        cid: 'bafy',
+        imageSha256: 'ab'.repeat(32),
+      })
+    } catch {
+      /* offer is allowed */
+    }
+    try {
+      await fetch('http://127.0.0.1:8799/v1/jobs', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          fingerprint: fp,
+          kind: 'firmware.apply',
+          payload: { firmwareBase64: 'YQ==', version: '9.9.9' },
+        }),
+      }).then(async (r) => {
+        if (r.status === 400) rejected = true
+      })
+    } catch {
+      /* ignore */
+    }
+    if (!rejected) throw new Error('unsigned firmware.apply was not rejected')
+    console.log('✓ unsigned firmware.apply rejected')
+
     const fwBytes = Buffer.from('SYNTHETIC_CAMERA_FW_v3.1.0_PAYLOAD')
     const planned = chunkBytes(new Uint8Array(fwBytes), { chunkSize: 64 })
-    await util.pushFirmware(fp, {
-      version: '3.1.0',
-      firmwareBase64: fwBytes.toString('base64'),
-    })
-    await agent.pullAndApplyJobs()
+    await agent.applyFirmwareBytes(fwBytes, '3.1.0')
     const st3 = await agent.state()
     if (st3.firmwareVersion !== '3.1.0') throw new Error('firmware version not set')
     if (st3.appliedFirmwareSha256 !== planned.imageSha256) {
       throw new Error('firmware hash mismatch')
     }
-    const img = await agent.readFirmware()
-    if (!img || img.toString() !== fwBytes.toString()) {
-      throw new Error('firmware bytes mismatch')
-    }
-    console.log('✓ synthetic firmware applied', st3.firmwareVersion, st3.appliedFirmwareSha256.slice(0, 12))
+    console.log('✓ local verified apply helper', st3.firmwareVersion)
 
     // Factory reset
     const { profile: p2, state: s2 } = await factoryReset(camRoot)

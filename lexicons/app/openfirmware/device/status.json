@@ -1,0 +1,56 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.device.status",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Latest heartbeat / apply status. rkey is the device fingerprint in the fleet repo.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["product", "status", "reportedAt"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "firmwareVersion": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "releaseUri": {
+            "type": "string",
+            "format": "at-uri"
+          },
+          "status": {
+            "type": "string",
+            "knownValues": [
+              "ok",
+              "updating",
+              "failed",
+              "pending",
+              "pending-window",
+              "quarantined"
+            ]
+          },
+          "lastError": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "reportedAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "uptimeSec": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "freeStorage": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

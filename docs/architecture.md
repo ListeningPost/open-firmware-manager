@@ -2,16 +2,20 @@
 
 ## Distribution center = PDS
 
-All releases are AT Protocol **repository records + blobs** on the **author’s Personal Data Server**. There is no separate product “catalog” as source of truth.
+All releases are AT Protocol **repository records + blobs** on the **author’s Personal Data Server**. There is no separate product catalog as source of truth.
 
 ```
 Publisher (ofw / @open-firmware/host)
-        │  createSession · uploadBlob · createRecord/putRecord
+        │  createSession (bots/CI) or OAuth (interactive)
+        │  uploadBlob · createRecord(release, immutable)
+        │  putRecord(gate, swap) · putRecord(channel, swap)
         ▼
-   AT Protocol PDS  ◄── Sidekar / IoT client poll listRecords · getBlob
+   AT Protocol PDS  ◄── Sidekar / client: getRecord(channel) · getRecord(release, cid) · getBlob
         │
-        └── signed commits (DID keys) + content digests
+        └── DID · commit signatures · blob CIDs · optional OEM Ed25519
 ```
+
+AppView (`@open-firmware/appview`) implements `app.openfirmware.firmware.getLatest` / `listReleases` / `getRelease` as an **index**. Clients re-verify against the author repo.
 
 ## Runtimes
 
@@ -20,25 +24,30 @@ Publisher (ofw / @open-firmware/host)
 | IoT / field edge | `@open-firmware/client` | **No** |
 | Server host | `@open-firmware/sidekar` | Optional (`docker load` for container kind) |
 
-Same release chain and Phase A/B verification for both.
+Same release record and Phase A/B for both.
 
 ## Artifact kinds
 
-`firmware` · `package` · `container` · `deployment` · `bundle`  
-See [spec-release-chain.md](./spec-release-chain.md).
+`firmware` · `package` · `container` · `deployment` · `bundle`
 
 ## Libraries
 
 | Package | Responsibility |
 |---------|----------------|
-| `core` | Chunk, hash, audit, windows |
-| `atproto-lite` | XRPC client |
+| `core` | Chunk, hash, audit, pipeline, OEM signatures, windows |
+| `atproto-lite` | XRPC: refresh, cursors, swap, identity, CID, XRPCError |
 | `host` | Publish API |
-| `client` | Resolve, audit, download |
+| `client` | Resolve channel, audit, download |
+| `appview` | Untrusted query index |
+| `fleet` | Device/enrollment/policy writers |
 | `sidekar` | Host agent loop + apply |
 | `ofw` (Rust) | Operator/CI CLI |
 
-## Deploy model (SMB / EC2 / on-prem)
+## Deploy model
 
-Default: **Sidekar reconciles** by polling the PDS for the latest ready release for its product/channel.  
-GitHub Actions only **builds and publishes** — it does not SSH to hosts or rebuild on the host.
+Default: **Sidekar reconciles** by `getRecord` on `app.openfirmware.firmware.channel` for its product/channel. GitHub Actions only **builds and publishes**.
+
+## Auth
+
+- Headless `ofw` / CI: `com.atproto.server.createSession` + app password, with `refreshSession`.
+- Interactive apps: ATProto OAuth (`docs/oauth-client-metadata.json`, scope `include:app.openfirmware.authPublisher blob:*/*`).

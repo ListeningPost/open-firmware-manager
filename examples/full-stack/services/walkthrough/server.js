@@ -33,6 +33,8 @@ const OFW_PASSWORD = process.env.OFW_PASSWORD || 'publisher-pass-change-me'
 const PRODUCT = process.env.PRODUCT || 'demo-site'
 const COL_RELEASE = 'app.openfirmware.firmware.release'
 const COL_ACK = 'app.openfirmware.firmware.pipelineAck'
+const COL_GATE = 'app.openfirmware.firmware.gate'
+const COL_CHANNEL = 'app.openfirmware.firmware.channel'
 
 /** Recent action log for the UI */
 const actionLog = []
@@ -113,7 +115,7 @@ function pipelineSummary(release, acksForRelease) {
 
   let gate = 'n/a'
   if (policy === 'skipped' || !require) gate = 'skipped (no CI required)'
-  else if (release.status === 'awaiting_pipeline') gate = 'waiting on CI'
+  else if (release.status === 'awaiting-pipeline') gate = 'waiting on CI'
   else if (release.status === 'failed') gate = 'failed'
   else if (release.status === 'ready') {
     const bad = stageRows.some(
@@ -123,6 +125,27 @@ function pipelineSummary(release, acksForRelease) {
   } else gate = release.status
 
   return { require, policy, stages, stageRows, gate }
+}
+
+async function listAllRecords(repo, collection) {
+  const out = []
+  let cursor
+  const seen = new Set()
+  for (let i = 0; i < 50; i++) {
+    const u = new URL(`${PDS_URL}/xrpc/com.atproto.repo.listRecords`)
+    u.searchParams.set('repo', repo)
+    u.searchParams.set('collection', collection)
+    u.searchParams.set('limit', '100')
+    if (cursor) u.searchParams.set('cursor', cursor)
+    const page = await safeFetch(u.toString())
+    if (!page.ok || !page.json?.records) break
+    out.push(...page.json.records)
+    const next = page.json.cursor
+    if (!next || next === cursor || seen.has(next)) break
+    seen.add(next)
+    cursor = next
+  }
+  return out
 }
 
 async function gatherStatus() {
@@ -135,39 +158,39 @@ async function gatherStatus() {
 
   let releases = []
   let allAcks = []
+  const gatesByRkey = new Map()
 
   if (authorDid && pdsHealth.ok) {
-    const u = new URL(`${PDS_URL}/xrpc/com.atproto.repo.listRecords`)
-    u.searchParams.set('repo', authorDid)
-    u.searchParams.set('collection', COL_RELEASE)
-    u.searchParams.set('limit', '15')
-    const list = await safeFetch(u.toString())
-
-    const ua = new URL(`${PDS_URL}/xrpc/com.atproto.repo.listRecords`)
-    ua.searchParams.set('repo', authorDid)
-    ua.searchParams.set('collection', COL_ACK)
-    ua.searchParams.set('limit', '100')
-    const acksList = await safeFetch(ua.toString())
-    if (acksList.ok && acksList.json?.records) {
-      allAcks = acksList.json.records.map((r) => ({
-        uri: r.uri,
-        releaseUri: r.value?.release?.uri,
-        stage: r.value?.stage,
-        result: r.value?.result,
-        createdAt: r.value?.createdAt,
-        runUrl: r.value?.runUrl,
-        summary: r.value?.summary,
-        actor: r.value?.actor,
-      }))
+    const listRecords = await listAllRecords(authorDid, COL_RELEASE)
+    const gateRecords = await listAllRecords(authorDid, COL_GATE)
+    const channelRecords = await listAllRecords(authorDid, COL_CHANNEL)
+    const liveUris = new Set(
+      channelRecords.map((c) => c.value?.release?.uri).filter(Boolean),
+    )
+    for (const g of gateRecords) {
+      gatesByRkey.set(g.uri?.split('/').pop(), g.value?.state)
     }
+    const ackRecords = await listAllRecords(authorDid, COL_ACK)
+    allAcks = ackRecords.map((r) => ({
+      uri: r.uri,
+      releaseUri: r.value?.release?.uri,
+      stage: r.value?.stage,
+      result: r.value?.result,
+      createdAt: r.value?.createdAt,
+      runUrl: r.value?.runUrl,
+      summary: r.value?.summary,
+      actor: r.value?.actor,
+    }))
 
-    if (list.ok && list.json?.records) {
-      releases = list.json.records.map((r) => {
+    if (listRecords.length) {
+      releases = listRecords.map((r) => {
         const value = r.value || {}
+        const rkey = r.uri?.split('/').pop()
+        const status = gatesByRkey.get(rkey) || 'unknown'
         const acksFor = allAcks.filter((a) => a.releaseUri === r.uri)
         const pipeline = pipelineSummary(
           {
-            status: value.status,
+            status,
             requirePipelineAcks: value.requirePipelineAcks,
             requiredPipelineStages: value.requiredPipelineStages,
             pipelinePolicy: value.pipelinePolicy,
@@ -176,10 +199,10 @@ async function gatherStatus() {
         )
         return {
           uri: r.uri,
-          rkey: r.uri?.split('/').pop(),
+          rkey,
           version: value.version,
           product: value.product,
-          status: value.status,
+          status,
           channel: value.channel,
           imageSize: value.imageSize,
           requirePipelineAcks: Boolean(value.requirePipelineAcks),
@@ -187,12 +210,13 @@ async function gatherStatus() {
           requiredPipelineStages: value.requiredPipelineStages || [],
           pipeline,
           acks: acksFor,
+          live: liveUris.has(r.uri),
         }
       })
     }
   }
 
-  const awaiting = releases.filter((r) => r.status === 'awaiting_pipeline')
+  const awaiting = releases.filter((r) => r.status === 'awaiting-pipeline')
   const ready = releases.filter((r) => r.status === 'ready')
 
   return {
@@ -280,7 +304,7 @@ async function doPublish({ message, requirePipeline }) {
       message: text,
       version: result.version ?? version,
       rkey: result.rkey,
-      status: result.status,
+      status: result.gateState,
       uri: result.release?.uri,
     })
     return {
@@ -288,7 +312,7 @@ async function doPublish({ message, requirePipeline }) {
       message: text,
       version,
       rkey: result.rkey,
-      status: result.status,
+      status: result.gateState,
       uri: result.release.uri,
       note: requirePipeline
         ? 'Awaiting pipeline-runner acks, then Sidekar will install.'
@@ -309,7 +333,7 @@ function resultBadge(result) {
 
 function statusBadge(status) {
   if (status === 'ready') return '<span class="ok">ready</span>'
-  if (status === 'awaiting_pipeline') return '<span class="warn">awaiting_pipeline</span>'
+  if (status === 'awaiting-pipeline') return '<span class="warn">awaiting-pipeline</span>'
   if (status === 'failed') return '<span class="bad">failed</span>'
   if (status === 'publishing') return '<span class="muted">publishing</span>'
   return `<span class="muted">${esc(status)}</span>`
@@ -380,7 +404,7 @@ function page(status) {
   const awaitingNote =
     status.counts.awaitingPipeline > 0
       ? `<p class="warn-box"><strong>${status.counts.awaitingPipeline}</strong> release(s) waiting on pipeline-runner acks before Sidekar installs.</p>`
-      : `<p class="muted">No releases currently in <code>awaiting_pipeline</code>.</p>`
+      : `<p class="muted">No releases currently in <code>awaiting-pipeline</code>.</p>`
 
   const logRows =
     status.actionLog.length === 0
@@ -700,7 +724,7 @@ function page(status) {
       </div>
       <p class="muted" style="margin:0.5rem 0 0;font-size:0.85rem">
         <strong>Skip CI:</strong> release becomes <code>ready</code> immediately → Sidekar installs.<br/>
-        <strong>With CI:</strong> release is <code>awaiting_pipeline</code> until the pipeline-runner container acks build+test → then Sidekar installs.
+        <strong>With CI:</strong> gate is <code>awaiting-pipeline</code> until the pipeline-runner acks build+test and updates the channel pointer → then Sidekar installs.
         A little 🚗 drives start → finish through each stage (including CI/CD).
       </p>
       <div id="flash"></div>

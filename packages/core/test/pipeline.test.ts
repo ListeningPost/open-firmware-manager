@@ -39,6 +39,7 @@ function ack(
     stage,
     result,
     createdAt: t,
+    actor: 'did:plc:author',
   }
 }
 
@@ -68,10 +69,47 @@ describe('auditPipelineAcks', () => {
   })
 
   it('allows skipPipelineCheck', () => {
-    const r = auditPipelineAcks(baseRelease({ status: 'awaiting_pipeline' }), [], {
+    const r = auditPipelineAcks(baseRelease({ status: 'awaiting-pipeline' }), [], {
       skipPipelineCheck: true,
     })
     expect(r.policy).toBe('skipped')
+    expect(r.ok).toBe(true)
+  })
+
+  it('when attesterDids is set, ignores publisher self-acks', () => {
+    const r = auditPipelineAcks(
+      baseRelease(),
+      [
+        { ...ack('build', 'passed'), authorDid: 'did:plc:author', actor: 'did:plc:author' },
+        { ...ack('test', 'passed'), authorDid: 'did:plc:author', actor: 'did:plc:author' },
+      ],
+      { attesterDids: ['did:plc:ci'] },
+    )
+    expect(r.ok).toBe(false)
+    expect(r.missingStages).toEqual(['build', 'test'])
+  })
+
+  it('when attesterDids is set, accepts CI acks', () => {
+    const r = auditPipelineAcks(
+      baseRelease(),
+      [
+        { ...ack('build', 'passed'), authorDid: 'did:plc:ci', actor: 'did:plc:ci' },
+        { ...ack('test', 'passed'), authorDid: 'did:plc:ci', actor: 'did:plc:ci' },
+      ],
+      { attesterDids: ['did:plc:ci'] },
+    )
+    expect(r.ok).toBe(true)
+  })
+
+  it('ignores acks that point at a different release', () => {
+    const r = auditPipelineAcks(baseRelease(), [
+      {
+        ...ack('build', 'passed'),
+        release: { uri: 'at://did:plc:author/app.openfirmware.firmware.release/other', cid: 'x' },
+      },
+      ack('build', 'passed'),
+      ack('test', 'passed'),
+    ])
     expect(r.ok).toBe(true)
   })
 
@@ -92,7 +130,7 @@ describe('auditPipelineAcks', () => {
 describe('isReleaseInstallable', () => {
   it('requires status ready', () => {
     const r = isReleaseInstallable(
-      baseRelease({ status: 'awaiting_pipeline' }),
+      baseRelease({ status: 'awaiting-pipeline' }),
       [ack('build', 'passed'), ack('test', 'passed')],
     )
     expect(r.installable).toBe(false)

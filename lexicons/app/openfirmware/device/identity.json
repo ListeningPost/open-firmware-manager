@@ -1,0 +1,52 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.device.identity",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Vendor-attested device or host identity stored in the fleet/author repo. rkey is the device fingerprint (devices typically do not have their own PDS).",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["product", "role", "fingerprint", "createdAt"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "role": {
+            "type": "string",
+            "knownValues": ["iot", "sidekar", "edge"]
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "SHA-256 hex of product|ed25519PublicKey",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "ed25519PublicKey": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "serialHash": {
+            "type": "string",
+            "description": "Privacy-preserving serial digest",
+            "maxLength": 64
+          },
+          "enrolledWith": {
+            "type": "string",
+            "format": "did"
+          },
+          "firmwareVersion": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

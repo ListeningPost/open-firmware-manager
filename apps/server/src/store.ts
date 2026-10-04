@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import type { SealedEnvelope } from '@open-firmware/iot'
@@ -41,7 +41,6 @@ export interface JobRecord {
   createdAt: string
   ackedAt?: string
   error?: string
-  /** Redacted summary only — never store plaintext secrets */
   summary: string
 }
 
@@ -53,6 +52,8 @@ export interface StoreData {
 }
 
 export class FileStore {
+  private chain: Promise<unknown> = Promise.resolve()
+
   constructor(private readonly filePath: string) {}
 
   async load(): Promise<StoreData> {
@@ -72,14 +73,20 @@ export class FileStore {
 
   async save(data: StoreData): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true })
-    await writeFile(this.filePath, JSON.stringify(data, null, 2))
+    const tmp = `${this.filePath}.${process.pid}.tmp`
+    await writeFile(tmp, JSON.stringify(data, null, 2))
+    await rename(tmp, this.filePath)
   }
 
   async update(fn: (data: StoreData) => void | Promise<void>): Promise<StoreData> {
-    const data = await this.load()
-    await fn(data)
-    await this.save(data)
-    return data
+    const run = this.chain.then(async () => {
+      const data = await this.load()
+      await fn(data)
+      await this.save(data)
+      return data
+    })
+    this.chain = run.catch(() => undefined)
+    return run
   }
 }
 

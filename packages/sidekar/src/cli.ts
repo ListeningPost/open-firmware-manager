@@ -18,9 +18,15 @@ function resolveAuthorDid(): string {
   throw new Error('AUTHOR_DID or AUTHOR_DID_FILE required')
 }
 
-const skipPipeline =
-  process.env.OFW_SKIP_PIPELINE === '1' ||
-  process.env.SKIP_PIPELINE_CHECK === '1'
+const skipPipeline = process.env.OFW_CONSUMER_SKIP_PIPELINE === '1'
+const attesterDids = (process.env.OFW_ATTESTER_DIDS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+const trustedOemKeys = (process.env.OFW_TRUSTED_OEM_KEYS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
 
 const sidekar = new Sidekar({
   pds: env('PDS_URL', process.env.OFW_PDS || 'http://127.0.0.1:2583'),
@@ -34,6 +40,8 @@ const sidekar = new Sidekar({
   dockerLoad: process.env.DOCKER_LOAD !== '0',
   composeProjectDir: process.env.COMPOSE_PROJECT_DIR,
   skipPipelineCheck: skipPipeline,
+  attesterDids: attesterDids.length ? attesterDids : undefined,
+  trustedOemKeys: trustedOemKeys.length ? trustedOemKeys : undefined,
 })
 
 // Health endpoint so walkthrough / orchestrators can see this container is up

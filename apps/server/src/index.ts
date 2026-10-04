@@ -3,21 +3,24 @@
  * Public AT is for releases/identity; secrets go through sealed jobs here.
  */
 import http from 'node:http'
+import { timingSafeEqual } from 'node:crypto'
 import { FileStore, newId, type JoinRequest, type JobRecord } from './store.js'
 import {
+  deviceFingerprint,
   sealForDevice,
   verifyDevicePayload,
-  type SealedEnvelope,
 } from '@open-firmware/iot'
 
 const PORT = Number(process.env.PORT || 8787)
 const DATA_FILE = process.env.DATA_FILE || '/data/control-store.json'
+const ALLOW_ORIGIN = process.env.OFW_CORS_ORIGIN || '*'
+const MAX_SKEW_MS = Number(process.env.OFW_AUTH_SKEW_MS || 5 * 60 * 1000)
 const store = new FileStore(DATA_FILE)
 
 function json(res: http.ServerResponse, status: number, body: unknown) {
   res.writeHead(status, {
     'content-type': 'application/json',
-    'access-control-allow-origin': '*',
+    'access-control-allow-origin': ALLOW_ORIGIN,
     'access-control-allow-headers':
       'content-type, authorization, x-ofw-fingerprint, x-ofw-timestamp, x-ofw-signature',
     'access-control-allow-methods': 'GET,POST,OPTIONS',
@@ -31,10 +34,23 @@ async function readBody(req: http.IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf8')
 }
 
+function safeEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a)
+  const bb = Buffer.from(b)
+  if (ba.length !== bb.length) return false
+  return timingSafeEqual(ba, bb)
+}
+
 function requireAdmin(req: http.IncomingMessage, adminToken: string): boolean {
   const h = req.headers.authorization || ''
   const token = h.startsWith('Bearer ') ? h.slice(7) : ''
-  return token === adminToken && token.length > 0
+  return token.length > 0 && adminToken.length > 0 && safeEqual(token, adminToken)
+}
+
+function timestampFresh(ts: string): boolean {
+  const n = Number(ts)
+  if (!Number.isFinite(n)) return false
+  return Math.abs(Date.now() - n) <= MAX_SKEW_MS
 }
 
 async function verifyDevice(
@@ -47,13 +63,12 @@ async function verifyDevice(
   const ts = String(req.headers['x-ofw-timestamp'] || '')
   const sig = String(req.headers['x-ofw-signature'] || '')
   if (!fingerprint || !ts || !sig) return null
+  if (!timestampFresh(ts)) return null
   const data = await store.load()
   const enr = data.enrollments.find(
     (e) => e.fingerprint === fingerprint && e.status === 'active',
   )
-  // Allow job pull also for pending join devices that are only in joins
-  const join = data.joins.find((j) => j.fingerprint === fingerprint)
-  const pub = enr?.ed25519PublicKey || join?.ed25519PublicKey
+  const pub = enr?.ed25519PublicKey
   if (!pub) return null
   const payload =
     bodyStatus !== undefined
@@ -113,6 +128,10 @@ const server = http.createServer(async (req, res) => {
         !verifyDevicePayload(body.ed25519PublicKey, payload, body.signature)
       ) {
         return json(res, 401, { error: 'invalid signature' })
+      }
+      const expectedFp = deviceFingerprint(body.product, body.ed25519PublicKey)
+      if (expectedFp !== body.fingerprint) {
+        return json(res, 400, { error: 'fingerprint does not match product|publicKey' })
       }
       const existing = data.joins.find(
         (j) => j.fingerprint === body.fingerprint && j.status === 'pending',
@@ -216,8 +235,6 @@ const server = http.createServer(async (req, res) => {
         enrolled: enr.status === 'active',
         enrollmentId: enr.id,
         status: enr.status,
-        product: enr.product,
-        serial: enr.serial,
       })
     }
 
@@ -238,6 +255,12 @@ const server = http.createServer(async (req, res) => {
         fingerprint: string
         kind: string
         payload: Record<string, unknown>
+      }
+      if (body.kind === 'firmware.apply' || body.payload?.firmwareBase64) {
+        return json(res, 400, {
+          error:
+            'unsigned firmware.apply is not allowed; use firmware.offer with a verified releaseUri',
+        })
       }
       const enr = data.enrollments.find(
         (e) => e.fingerprint === body.fingerprint && e.status === 'active',
@@ -329,6 +352,9 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, async () => {
   const data = await store.load()
   console.log(`control plane listening on :${PORT}`)
-  console.log(`admin token: ${data.adminToken}`)
-  console.log(`(set OFW_ADMIN_TOKEN to this value for utility CLI)`)
+  if (process.env.OFW_REVEAL_ADMIN_TOKEN === '1') {
+    console.log(`admin token: ${data.adminToken}`)
+  } else {
+    console.log('admin token is set (OFW_REVEAL_ADMIN_TOKEN=1 to print)')
+  }
 })

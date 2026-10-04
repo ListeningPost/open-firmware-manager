@@ -1,10 +1,15 @@
-# Example: private GitHub repo → publish signed release to your AT Protocol PDS.
-# Sidekar on EC2 / on-prem polls the PDS and reloads containers — no inbound trigger required.
+# Private GitHub repo → signed release on your AT Protocol PDS.
+# Sidekar polls the channel pointer. No inbound deploy webhook.
 #
 # Setup:
-#   1. Copy this file to .github/workflows/open-firmware-publish.yml in your app repo
-#   2. Add secrets: OFW_PDS, OFW_IDENTIFIER, OFW_PASSWORD
-#   3. Adjust product name, build steps, and artifact path
+#   1. Copy to .github/workflows/open-firmware-publish.yml
+#   2. Secrets (publisher): OFW_PDS, OFW_IDENTIFIER, OFW_PASSWORD
+#   3. Optional independent CI attester: OFW_CI_IDENTIFIER, OFW_CI_PASSWORD
+#      When set, acks are written by the CI account; the publisher then
+#      pipeline-promote. Sidekar should set OFW_ATTESTER_DIDS to that CI DID.
+#   4. Adjust product, build, artifact path
+#
+# ofw publish --json writes a single JSON object to stdout (rkey, uri, cid, gate, authorDid).
 
 name: Open Firmware publish
 
@@ -44,7 +49,6 @@ jobs:
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
-      # --- build your artifact (example: docker save) ---
       - name: Build container image
         run: |
           docker build -t "${{ env.PRODUCT }}:${{ steps.ver.outputs.version }}" .
@@ -54,8 +58,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build ofw CLI
-        # Prefer a released binary later; for now build from monorepo checkout or submodule.
-        # If ofw lives in a separate repo, change this path.
         run: |
           if [[ -d cli ]]; then
             cargo install --path cli --root "$HOME/.local"
@@ -64,15 +66,13 @@ jobs:
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Publish signed release (await CI acks)
+      - name: Publish immutable release (gate=awaiting-pipeline)
         id: publish
         env:
           OFW_PDS: ${{ secrets.OFW_PDS }}
           OFW_IDENTIFIER: ${{ secrets.OFW_IDENTIFIER }}
           OFW_PASSWORD: ${{ secrets.OFW_PASSWORD }}
         run: |
-          # Upload artifact first; status=awaiting_pipeline until tests ack.
-          # Use --skip-pipeline instead to mark ready immediately.
           OUT=$(ofw publish \
             --product "${{ env.PRODUCT }}" \
             --version "${{ steps.ver.outputs.version }}" \
@@ -85,34 +85,56 @@ jobs:
             --yes \
             --json)
           echo "$OUT"
-          echo "rkey=$(echo "$OUT" | jq -r .rkey)" >> "$GITHUB_OUTPUT"
+          RKEY=$(printf '%s\n' "$OUT" | jq -er .rkey)
+          GATE=$(printf '%s\n' "$OUT" | jq -er .gate)
+          AUTHOR=$(printf '%s\n' "$OUT" | jq -er .authorDid)
+          echo "rkey=$RKEY" >> "$GITHUB_OUTPUT"
+          echo "gate=$GATE" >> "$GITHUB_OUTPUT"
+          echo "authorDid=$AUTHOR" >> "$GITHUB_OUTPUT"
+          test "$GATE" = "awaiting-pipeline"
 
-      - name: Ack build stage
+      - name: Ack build + test
+        id: ack
         env:
           OFW_PDS: ${{ secrets.OFW_PDS }}
-          OFW_IDENTIFIER: ${{ secrets.OFW_IDENTIFIER }}
-          OFW_PASSWORD: ${{ secrets.OFW_PASSWORD }}
+          OFW_IDENTIFIER: ${{ secrets.OFW_CI_IDENTIFIER || secrets.OFW_IDENTIFIER }}
+          OFW_PASSWORD: ${{ secrets.OFW_CI_PASSWORD || secrets.OFW_PASSWORD }}
+          AUTHOR_DID: ${{ steps.publish.outputs.authorDid }}
         run: |
-          ofw pipeline-ack \
+          echo "run your real test suite here"
+          ACK_ID="${{ secrets.OFW_CI_IDENTIFIER }}"
+          AUTHOR_FLAG=()
+          if [[ -n "$ACK_ID" ]]; then
+            AUTHOR_FLAG=(--author-did "$AUTHOR_DID")
+          fi
+          BUILD=$(ofw pipeline-ack \
             --rkey "${{ steps.publish.outputs.rkey }}" \
+            "${AUTHOR_FLAG[@]}" \
             --stage build \
             --result passed \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --commit "${{ github.sha }}"
+            --commit "${{ github.sha }}" \
+            --json)
+          echo "$BUILD"
+          TEST=$(ofw pipeline-ack \
+            --rkey "${{ steps.publish.outputs.rkey }}" \
+            "${AUTHOR_FLAG[@]}" \
+            --stage test \
+            --result passed \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --commit "${{ github.sha }}" \
+            --json)
+          echo "$TEST"
+          ACTOR=$(printf '%s\n' "$TEST" | jq -er .actor)
+          echo "actor=$ACTOR" >> "$GITHUB_OUTPUT"
 
-      - name: Run tests
-        run: echo "run your real test suite here"
-
-      - name: Ack test stage (promotes to ready when complete)
+      - name: Promote gate + channel from acks
         env:
           OFW_PDS: ${{ secrets.OFW_PDS }}
           OFW_IDENTIFIER: ${{ secrets.OFW_IDENTIFIER }}
           OFW_PASSWORD: ${{ secrets.OFW_PASSWORD }}
         run: |
-          ofw pipeline-ack \
+          ofw pipeline-promote \
             --rkey "${{ steps.publish.outputs.rkey }}" \
-            --stage test \
-            --result passed \
-            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --commit "${{ github.sha }}"
-          # To skip remaining gates: ofw pipeline-skip --rkey "..."
+            --attester-did "${{ steps.ack.outputs.actor }}" \
+            --json

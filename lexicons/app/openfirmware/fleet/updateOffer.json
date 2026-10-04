@@ -14,12 +14,8 @@
             "type": "ref",
             "ref": "com.atproto.repo.strongRef"
           },
-          "version": {
-            "type": "string"
-          },
-          "product": {
-            "type": "string"
-          },
+          "version": { "type": "string", "maxLength": 64 },
+          "product": { "type": "string", "maxLength": 128 },
           "priority": {
             "type": "string",
             "knownValues": ["optional", "recommended", "required"]
@@ -57,11 +53,12 @@
       "properties": {
         "type": {
           "type": "string",
-          "knownValues": ["all", "product", "label", "did", "role"]
+          "knownValues": ["all", "product", "label", "did", "role", "fingerprint"]
         },
-        "product": { "type": "string" },
-        "label": { "type": "string" },
+        "product": { "type": "string", "maxLength": 128 },
+        "label": { "type": "string", "maxLength": 64 },
         "did": { "type": "string", "format": "did" },
+        "fingerprint": { "type": "string", "maxLength": 64 },
         "role": {
           "type": "string",
           "knownValues": ["iot", "sidekar", "edge"]
@@ -76,39 +73,28 @@
           "minimum": 0,
           "maximum": 100
         },
-        "salt": {
-          "type": "string"
-        }
+        "salt": { "type": "string", "maxLength": 128 }
       }
     },
     "serviceWindow": {
       "type": "object",
       "required": ["timezone", "allowFrom", "allowTo"],
       "properties": {
-        "timezone": { "type": "string" },
-        "allowFrom": {
-          "type": "string",
-          "description": "HH:MM 24h local to timezone"
-        },
-        "allowTo": {
-          "type": "string",
-          "description": "HH:MM 24h local to timezone"
-        },
+        "timezone": { "type": "string", "maxLength": 64 },
+        "allowFrom": { "type": "string", "maxLength": 8 },
+        "allowTo": { "type": "string", "maxLength": 8 },
         "days": {
           "type": "array",
           "items": {
             "type": "integer",
             "minimum": 0,
             "maximum": 6
-          }
+          },
+          "maxLength": 7
         },
-        "urgentBypass": {
-          "type": "boolean",
-          "description": "If true, required priority may ignore the window"
-        },
+        "urgentBypass": { "type": "boolean" },
         "skewSec": {
           "type": "integer",
-          "description": "Allowed clock skew seconds",
           "minimum": 0
         }
       }

@@ -6,28 +6,20 @@ export type ArtifactKind =
   | 'deployment'
   | 'bundle'
 
-/**
- * Apply runtime. IoT never requires Docker.
- * Sidekar is the server-side host agent that may use Docker.
- */
 export type ApplyRuntime = 'iot' | 'sidekar' | 'edge' | 'any'
 
 export type ReleaseChannel = 'stable' | 'beta' | 'dev'
 
-export type ReleaseStatus =
-  | 'publishing'
-  | 'awaiting_pipeline'
-  | 'ready'
-  | 'failed'
+/** Gate sidecar state (kebab-case, matches lexicon). */
+export type GateState = 'awaiting-pipeline' | 'ready' | 'failed'
 
-/** How pipeline acknowledgments are enforced for install. */
 export type PipelinePolicy = 'strict' | 'optional' | 'skipped'
 
 export type PipelineStage =
   | 'build'
   | 'test'
   | 'lint'
-  | 'security_scan'
+  | 'security-scan'
   | 'sign'
   | 'promote'
   | 'custom'
@@ -41,28 +33,36 @@ export type NodeStatus =
   | 'updating'
   | 'failed'
   | 'pending'
-  | 'pending_window'
+  | 'pending-window'
   | 'quarantined'
 
 export type OfferPriority = 'optional' | 'recommended' | 'required'
 
-/** AT Protocol strong reference (uri + cid). */
 export interface StrongRef {
   uri: string
   cid: string
 }
 
-export interface ReplyRef {
-  root: StrongRef
-  parent: StrongRef
-}
-
-/** Minimal blob metadata as stored on chunk records. */
 export interface BlobRef {
   $type?: string
   ref: { $link: string } | string
   mimeType: string
   size: number
+}
+
+export interface OemSignature {
+  alg: 'ed25519'
+  publicKey: string
+  sig: string
+  keyId?: string
+}
+
+export interface ReleasePart {
+  seq: number
+  blob: BlobRef
+  sha256: string
+  byteOffset: number
+  byteLength: number
 }
 
 export interface ReleaseRecord {
@@ -73,12 +73,10 @@ export interface ReleaseRecord {
   createdAt: string
   imageSha256: string
   imageSize: number
-  chunkCount: number
   chunkSize?: number
   mimeType?: string
   channel: ReleaseChannel
-  status: ReleaseStatus
-  /** When true, installers should verify pipeline acks (unless consumer forces skip). */
+  parts: ReleasePart[]
   requirePipelineAcks?: boolean
   requiredPipelineStages?: string[]
   pipelinePolicy?: PipelinePolicy
@@ -87,6 +85,25 @@ export interface ReleaseRecord {
   platform?: string
   ociDigest?: string
   runtime?: ApplyRuntime
+  oemSignature?: OemSignature
+}
+
+export interface ChannelRecord {
+  $type?: string
+  product: string
+  channel: ReleaseChannel
+  release: StrongRef
+  version: string
+  updatedAt: string
+  maxAgeSec?: number
+}
+
+export interface GateRecord {
+  $type?: string
+  release: StrongRef
+  state: GateState
+  updatedAt: string
+  reason?: string
 }
 
 export interface PipelineAckRecord {
@@ -99,27 +116,16 @@ export interface PipelineAckRecord {
   runUrl?: string
   commit?: string
   summary?: string
-  actor?: string
+  actor: string
   uri?: string
   cid?: string
   authorDid?: string
 }
 
-export interface ChunkRecord {
-  $type?: string
-  reply: ReplyRef
-  seq: number
-  blob: BlobRef
-  sha256: string
-  byteOffset: number
-  byteLength: number
-  createdAt: string
-}
-
 export interface ReleaseSealRecord {
   $type?: string
   release: StrongRef
-  chunkCount: number
+  partCount: number
   imageSha256: string
   createdAt: string
 }
@@ -134,10 +140,11 @@ export interface ServiceWindow {
 }
 
 export interface OfferTarget {
-  type: 'all' | 'product' | 'label' | 'did' | 'role'
+  type: 'all' | 'product' | 'label' | 'did' | 'role' | 'fingerprint'
   product?: string
   label?: string
   did?: string
+  fingerprint?: string
   role?: DeviceRole
 }
 
@@ -160,24 +167,15 @@ export interface UpdateOfferRecord {
   expiresAt?: string
 }
 
-/** In-memory chunk used for audit/assemble (network-agnostic). */
+/** In-memory part used for audit/assemble (network-agnostic). */
 export interface ChunkMeta {
   seq: number
   sha256: string
   byteOffset: number
   byteLength: number
-  /** Blob CID / link string when known. */
   blobCid?: string
-  /** Declared blob.size from record, if present. */
   blobSize?: number
-  /** Author DID that produced this chunk record. */
   authorDid?: string
-  /** Strong refs for chain linkage checks. */
-  rootUri?: string
-  rootCid?: string
-  parentUri?: string
-  parentCid?: string
-  /** Record URI/CID of this chunk. */
   uri?: string
   cid?: string
 }
@@ -190,7 +188,8 @@ export interface ReleaseMeta {
   imageSize: number
   chunkCount: number
   channel: ReleaseChannel
-  status: ReleaseStatus
+  /** Resolved from the gate sidecar (or 'ready' when following a channel pointer). */
+  status: GateState
   authorDid: string
   uri?: string
   cid?: string
@@ -199,11 +198,12 @@ export interface ReleaseMeta {
   requirePipelineAcks?: boolean
   requiredPipelineStages?: string[]
   pipelinePolicy?: PipelinePolicy
+  oemSignature?: OemSignature
+  createdAt?: string
 }
 
 export type AuditErrorCode =
   | 'AUTHOR_MISMATCH'
-  | 'CHAIN_BROKEN'
   | 'COUNT_MISMATCH'
   | 'SEQ_GAP'
   | 'SEQ_DUPLICATE'
@@ -216,10 +216,15 @@ export type AuditErrorCode =
   | 'IMAGE_TOO_LARGE'
   | 'BLOB_SIZE_MISMATCH'
   | 'BLOB_UNAVAILABLE'
+  | 'BLOB_CID_MISMATCH'
   | 'EMPTY_CHAIN'
   | 'PIPELINE_REQUIRED'
   | 'PIPELINE_FAILED'
   | 'PIPELINE_INCOMPLETE'
+  | 'OEM_SIG_MISSING'
+  | 'OEM_SIG_INVALID'
+  | 'TYPE_MISMATCH'
+  | 'STALE_CHANNEL'
 
 export interface AuditIssue {
   code: AuditErrorCode
@@ -246,9 +251,11 @@ export interface ChunkPlan {
 
 export const COLLECTIONS = {
   release: 'app.openfirmware.firmware.release',
-  chunk: 'app.openfirmware.firmware.chunk',
+  channel: 'app.openfirmware.firmware.channel',
+  gate: 'app.openfirmware.firmware.gate',
   releaseSeal: 'app.openfirmware.firmware.releaseSeal',
   pipelineAck: 'app.openfirmware.firmware.pipelineAck',
+  declaration: 'app.openfirmware.actor.declaration',
   deviceIdentity: 'app.openfirmware.device.identity',
   deviceStatus: 'app.openfirmware.device.status',
   deviceCapabilities: 'app.openfirmware.device.capabilities',
@@ -258,16 +265,32 @@ export const COLLECTIONS = {
   fleetPolicy: 'app.openfirmware.fleet.policy',
 } as const
 
-/** Default stages when requirePipelineAcks is true but requiredPipelineStages is empty. */
 export const DEFAULT_PIPELINE_STAGES = ['build', 'test'] as const
 
-/** Kinds typically applied by IoT client (no Docker). */
+/** Default part size: 4 MiB. Under every current PDS blob cap. */
+export const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024
+
+/** Official Bluesky PDS blob upload limit. */
+export const MAX_BLOB_BYTES = 50 * 1024 * 1024
+
 export const IOT_DEFAULT_KINDS: ArtifactKind[] = ['firmware', 'package']
 
-/** Kinds typically applied by Sidekar (Docker-capable host). */
 export const SIDEKAR_DEFAULT_KINDS: ArtifactKind[] = [
   'container',
   'deployment',
   'bundle',
   'package',
 ]
+
+export function channelRkey(product: string, channel: string): string {
+  return releaseRkey(product, '', channel).replace(/--+/g, '-')
+}
+
+export function releaseRkey(
+  product: string,
+  version: string,
+  channel: string,
+): string {
+  const raw = version ? `${product}-${version}-${channel}` : `${product}-${channel}`
+  return raw.replace(/[^A-Za-z0-9._~-]+/g, '-')
+}

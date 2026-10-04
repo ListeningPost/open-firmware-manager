@@ -1,4 +1,4 @@
-//! Phase A metadata integrity suite (BitTorrent-style preflight).
+//! Phase A metadata integrity suite.
 
 use crate::chunk::is_sha256_hex;
 use serde::{Deserialize, Serialize};
@@ -27,10 +27,6 @@ pub struct ChunkMeta {
     pub blob_cid: Option<String>,
     pub blob_size: Option<u64>,
     pub author_did: Option<String>,
-    pub root_uri: Option<String>,
-    pub parent_uri: Option<String>,
-    pub uri: Option<String>,
-    pub cid: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +81,7 @@ pub fn audit_release_chain(
             &mut issues,
             "INCOMPLETE_PUBLISH",
             format!(
-                "release status is \"{}\", expected \"ready\"",
+                "gate state is \"{}\", expected \"ready\"",
                 release.status
             ),
             None,
@@ -106,7 +102,7 @@ pub fn audit_release_chain(
             &mut issues,
             "COUNT_MISMATCH",
             format!(
-                "expected {} chunk(s), got {}",
+                "expected {} part(s), got {}",
                 release.chunk_count,
                 chunks.len()
             ),
@@ -144,7 +140,7 @@ pub fn audit_release_chain(
             None => push(
                 &mut issues,
                 "SEQ_GAP",
-                format!("missing chunk seq {seq}"),
+                format!("missing part seq {seq}"),
                 Some(seq),
             ),
         }
@@ -152,14 +148,14 @@ pub fn audit_release_chain(
 
     let mut expected_offset = 0u64;
     let mut sum_lengths = 0u64;
-    for (i, c) in ordered.iter().enumerate() {
+    for c in &ordered {
         sum_lengths += c.byte_length;
         if c.byte_offset != expected_offset {
             push(
                 &mut issues,
                 "LAYOUT_INVALID",
                 format!(
-                    "chunk seq {} byteOffset {} expected {expected_offset}",
+                    "part seq {} byteOffset {} expected {expected_offset}",
                     c.seq, c.byte_offset
                 ),
                 Some(c.seq),
@@ -172,7 +168,7 @@ pub fn audit_release_chain(
                 push(
                     &mut issues,
                     "AUTHOR_MISMATCH",
-                    format!("chunk seq {} author {did} != {}", c.seq, release.author_did),
+                    format!("part seq {} author {did} != {}", c.seq, release.author_did),
                     Some(c.seq),
                 );
             }
@@ -182,14 +178,14 @@ pub fn audit_release_chain(
             push(
                 &mut issues,
                 "DIGEST_MISSING",
-                format!("chunk seq {} missing sha256", c.seq),
+                format!("part seq {} missing sha256", c.seq),
                 Some(c.seq),
             );
         } else if !is_sha256_hex(&c.sha256) {
             push(
                 &mut issues,
                 "DIGEST_INVALID",
-                format!("chunk seq {} invalid sha256", c.seq),
+                format!("part seq {} invalid sha256", c.seq),
                 Some(c.seq),
             );
         }
@@ -200,46 +196,11 @@ pub fn audit_release_chain(
                     &mut issues,
                     "BLOB_SIZE_MISMATCH",
                     format!(
-                        "chunk seq {} blob.size {bs} != byteLength {}",
+                        "part seq {} blob.size {bs} != byteLength {}",
                         c.seq, c.byte_length
                     ),
                     Some(c.seq),
                 );
-            }
-        }
-
-        if let (Some(root), Some(rel_uri)) = (&c.root_uri, &release.uri) {
-            if root != rel_uri {
-                push(
-                    &mut issues,
-                    "CHAIN_BROKEN",
-                    format!("chunk seq {} root uri mismatch", c.seq),
-                    Some(c.seq),
-                );
-            }
-        }
-
-        if i == 0 {
-            if let (Some(parent), Some(rel_uri)) = (&c.parent_uri, &release.uri) {
-                if parent != rel_uri {
-                    push(
-                        &mut issues,
-                        "CHAIN_BROKEN",
-                        "chunk seq 0 parent should be release uri".into(),
-                        Some(0),
-                    );
-                }
-            }
-        } else if let Some(prev) = ordered.get(i - 1) {
-            if let (Some(parent), Some(prev_uri)) = (&c.parent_uri, &prev.uri) {
-                if parent != prev_uri {
-                    push(
-                        &mut issues,
-                        "CHAIN_BROKEN",
-                        format!("chunk seq {} parent does not match previous", c.seq),
-                        Some(c.seq),
-                    );
-                }
             }
         }
     }
@@ -273,7 +234,6 @@ mod tests {
     fn good_chain_passes() {
         let data = vec![7u8; 500];
         let planned = chunk_bytes(&data, 200).unwrap();
-        let release_uri = "at://did:plc:author/app.openfirmware.firmware.release/r1";
         let release = ReleaseMeta {
             version: "1.0.0".into(),
             product: "demo".into(),
@@ -284,24 +244,13 @@ mod tests {
             channel: "stable".into(),
             status: "ready".into(),
             author_did: "did:plc:author".into(),
-            uri: Some(release_uri.into()),
+            uri: Some("at://did:plc:author/app.openfirmware.firmware.release/r1".into()),
             cid: Some("bafyrelease".into()),
         };
-        let mut chunks = Vec::new();
-        for c in &planned.chunks {
-            let uri = format!(
-                "at://did:plc:author/app.openfirmware.firmware.chunk/c{}",
-                c.seq
-            );
-            let parent = if c.seq == 0 {
-                release_uri.to_string()
-            } else {
-                format!(
-                    "at://did:plc:author/app.openfirmware.firmware.chunk/c{}",
-                    c.seq - 1
-                )
-            };
-            chunks.push(ChunkMeta {
+        let chunks: Vec<ChunkMeta> = planned
+            .chunks
+            .iter()
+            .map(|c| ChunkMeta {
                 seq: c.seq,
                 sha256: c.sha256.clone(),
                 byte_offset: c.byte_offset,
@@ -309,12 +258,8 @@ mod tests {
                 blob_cid: Some(format!("bafk{}", c.seq)),
                 blob_size: Some(c.byte_length),
                 author_did: Some("did:plc:author".into()),
-                root_uri: Some(release_uri.into()),
-                parent_uri: Some(parent),
-                uri: Some(uri),
-                cid: Some(format!("cid{}", c.seq)),
-            });
-        }
+            })
+            .collect();
         let report = audit_release_chain(
             &release,
             &chunks,
@@ -336,7 +281,7 @@ mod tests {
             image_size: 0,
             chunk_count: 0,
             channel: "stable".into(),
-            status: "publishing".into(),
+            status: "awaiting-pipeline".into(),
             author_did: "did:plc:x".into(),
             uri: None,
             cid: None,

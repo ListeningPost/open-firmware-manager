@@ -1,0 +1,42 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.firmware.channel",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Mutable pointer to the current ready release for a product+channel. rkey is {product}-{channel}. Update with swapRecord. This is the consumer catalog API; listRecords is not.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["product", "channel", "release", "version", "updatedAt"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "channel": {
+            "type": "string",
+            "knownValues": ["stable", "beta", "dev"]
+          },
+          "release": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "maxAgeSec": {
+            "type": "integer",
+            "description": "Optional freshness bound. Consumers may refuse a pointer older than this.",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

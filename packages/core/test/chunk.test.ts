@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { assembleChunks, chunkBytes } from '../src/chunk/index.js'
+import { channelRkey, releaseRkey } from '../src/types/index.js'
 import { sha256Hex } from '../src/hash/index.js'
 
 describe('chunkBytes / assembleChunks', () => {
@@ -27,6 +28,11 @@ describe('chunkBytes / assembleChunks', () => {
     const { chunks, imageSize } = chunkBytes(new Uint8Array(0))
     expect(chunks).toHaveLength(0)
     expect(imageSize).toBe(0)
+  })
+
+  it('builds ATProto-safe rkeys', () => {
+    expect(releaseRkey('my app', '1.0.0', 'stable')).toBe('my-app-1.0.0-stable')
+    expect(channelRkey('my app', 'stable')).toBe('my-app-stable')
   })
 
   it('rejects assemble with gap', () => {

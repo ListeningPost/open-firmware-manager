@@ -18,7 +18,7 @@ VERSION="${VERSION:-1.$(date +%s).0}"
 TMP="$(mktemp)"
 printf '%s' "$MSG" >"$TMP"
 
-echo "Publishing WITH pipeline gate → awaiting_pipeline"
+echo "Publishing WITH pipeline gate → awaiting-pipeline"
 echo "  product=demo-site version=${VERSION}"
 echo "  message=${MSG}"
 
@@ -38,8 +38,8 @@ echo "  message=${MSG}"
 
 rm -f "$TMP"
 echo
-echo "Release is awaiting_pipeline."
+echo "Release gate is awaiting-pipeline."
 echo "  • Watch http://localhost:8099 for stage results"
 echo "  • Runner will auto-ack if pipeline-runner is up, or run:"
 echo "      ./scripts/pipeline-runner-once.sh"
-echo "  • Sidekar installs only after status becomes ready"
+echo "  • Sidekar installs only after the channel pointer is updated"

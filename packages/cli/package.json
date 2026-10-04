@@ -1,17 +1,30 @@
 {
   "name": "@open-firmware/cli",
   "version": "0.1.0",
-  "description": "ofw CLI for publish, audit, verify, agent, sidekar",
+  "description": "Node helper around @open-firmware/host (production CLI is Rust ofw)",
   "license": "Apache-2.0",
   "type": "module",
-  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src"],
   "scripts": {
-    "build": "echo \"cli scaffold\"",
-    "typecheck": "echo \"cli scaffold\"",
-    "test": "echo \"cli scaffold\""
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo ok",
+    "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@open-firmware/core": "workspace:*"
+    "@open-firmware/host": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "@types/node": "^22.10.7"
   },
   "engines": {
     "node": ">=20"

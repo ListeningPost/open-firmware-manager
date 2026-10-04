@@ -1,0 +1,33 @@
+{
+  "lexicon": 1,
+  "id": "app.openfirmware.firmware.gate",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Mutable publish/CI gate for a release. Same rkey as the immutable firmware.release record (sidecar pattern). Update with swapRecord so strongRefs on the release stay valid.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["release", "state", "updatedAt"],
+        "properties": {
+          "release": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "state": {
+            "type": "string",
+            "knownValues": ["awaiting-pipeline", "ready", "failed"]
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        }
+      }
+    }
+  }
+}
