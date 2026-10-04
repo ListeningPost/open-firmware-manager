@@ -4,36 +4,141 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  schedule:
+    # Weekly run so dependency advisories surface without a code change.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  # Reused by release.yml as its verification gate.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  # The "ci-" prefix keeps this group distinct from release.yml's own group
+  # when CI runs as a reusable workflow (github.workflow is then "Release",
+  # and group names are case-insensitive, so the two would deadlock).
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Keep in sync with release.yml.
+  RUST_TOOLCHAIN: "1.94.1"
 
 jobs:
   ts:
+    name: TypeScript (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          version: 9.15.0
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      # pnpm version comes from "packageManager" in package.json.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @open-firmware/core test
-      - run: pnpm --filter @open-firmware/iot test
-      - run: pnpm --filter @open-firmware/core build
-      - run: pnpm --filter @open-firmware/atproto-lite build
-      - run: pnpm --filter @open-firmware/iot build
-      - run: pnpm --filter @open-firmware/host build
-      - run: pnpm --filter @open-firmware/client build
-      - run: pnpm --filter @open-firmware/sidekar build
-      - run: pnpm --filter @open-firmware/utility build
-      - run: pnpm --filter @open-firmware/server build
-      - run: pnpm --filter @open-firmware/iot-camera-emulator test:e2e
+      - run: pnpm -r build
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm -r test
+      - name: IoT camera emulator end-to-end
+        run: pnpm test:e2e
 
   rust-cli:
+    name: Rust CLI (ofw)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: cli
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --manifest-path cli/Cargo.toml
-      - run: cargo build --release --manifest-path cli/Cargo.toml
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: cli
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+
+  docker:
+    name: Docker build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: server
+            context: .
+            dockerfile: apps/server/Dockerfile
+          - name: sidekar
+            context: .
+            dockerfile: examples/full-stack/services/sidekar/Dockerfile
+          - name: walkthrough
+            context: .
+            dockerfile: examples/full-stack/services/walkthrough/Dockerfile
+          - name: demo-site
+            context: examples/full-stack/services/demo-site
+            dockerfile: examples/full-stack/services/demo-site/Dockerfile
+          - name: pipeline-runner
+            context: examples/full-stack/services/pipeline-runner
+            dockerfile: examples/full-stack/services/pipeline-runner/Dockerfile
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Build only; nothing is pushed.
+      - name: Build image
+        env:
+          NAME: ${{ matrix.name }}
+          CONTEXT: ${{ matrix.context }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+        run: docker build --pull -f "$DOCKERFILE" -t "open-firmware/$NAME:ci" "$CONTEXT"
+      - name: Image must not run as root
+        env:
+          NAME: ${{ matrix.name }}
+        run: |
+          user=$(docker inspect -f '{{.Config.User}}' "open-firmware/$NAME:ci")
+          echo "image user: ${user:-<unset>}"
+          case "$user" in ""|root|0|0:*) echo "::error::image runs as root"; exit 1 ;; esac
+
+  audit:
+    name: Dependency audit (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Advisory: new upstream advisories must not block unrelated pull
+    # requests. Findings show up as a failed (but non-blocking) job and in the
+    # weekly scheduled run.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: pnpm audit (production dependencies, high and above)
+        run: pnpm audit --prod --audit-level high
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        if: ${{ !cancelled() }}
+        with:
+          tool: cargo-audit
+      - name: cargo audit
+        if: ${{ !cancelled() }}
+        run: cargo audit --file cli/Cargo.lock
