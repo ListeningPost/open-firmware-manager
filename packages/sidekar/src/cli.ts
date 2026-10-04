@@ -28,6 +28,16 @@ const trustedOemKeys = (process.env.OFW_TRUSTED_OEM_KEYS || '')
   .map((s) => s.trim())
   .filter(Boolean)
 
+const requiredStages = (process.env.OFW_REQUIRED_PIPELINE_STAGES || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+const requireOemEnv = process.env.OFW_REQUIRE_OEM_SIGNATURE
+const maxImageBytes = Number(process.env.OFW_MAX_IMAGE_BYTES || 0)
+if (!Number.isFinite(maxImageBytes) || maxImageBytes < 0) {
+  throw new Error('OFW_MAX_IMAGE_BYTES must be a non-negative number')
+}
+
 const sidekar = new Sidekar({
   pds: env('PDS_URL', process.env.OFW_PDS || 'http://127.0.0.1:2583'),
   authorDid: resolveAuthorDid(),
@@ -42,6 +52,12 @@ const sidekar = new Sidekar({
   skipPipelineCheck: skipPipeline,
   attesterDids: attesterDids.length ? attesterDids : undefined,
   trustedOemKeys: trustedOemKeys.length ? trustedOemKeys : undefined,
+  // Set keys => signature required. OFW_REQUIRE_OEM_SIGNATURE=1 without keys
+  // refuses everything rather than trusting the key embedded in the record.
+  requireOemSignature:
+    requireOemEnv === undefined ? undefined : requireOemEnv === '1',
+  requiredPipelineStages: requiredStages.length ? requiredStages : undefined,
+  maxImageBytes: maxImageBytes > 0 ? maxImageBytes : undefined,
 })
 
 // Health endpoint so walkthrough / orchestrators can see this container is up

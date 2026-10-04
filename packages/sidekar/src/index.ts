@@ -3,6 +3,7 @@ import {
   type AppliedRelease,
   type ApplyHandler,
 } from '@open-firmware/client'
+import { isSafePathSegment, type PipelinePolicy } from '@open-firmware/core'
 import { readFile, writeFile, mkdir, copyFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -23,11 +24,26 @@ export interface SidekarConfig {
   /** Optional compose project directory to `docker compose up -d` after load */
   composeProjectDir?: string
   trustedAuthors?: string[]
+  /** Pinned OEM keys. When set, unsigned or wrongly signed releases are refused. */
   trustedOemKeys?: string[]
-  /** CI attester DIDs whose pipelineAck records are required when set. */
+  /** Require an OEM signature. Defaults to true when trustedOemKeys is set. */
+  requireOemSignature?: boolean
+  /**
+   * CI attester DIDs. When set, passed acks from these DIDs are required for
+   * every release, whatever policy the release record declares.
+   */
   attesterDids?: string[]
+  /** Consumer-side minimum pipeline policy. Defaults to 'strict' with attesterDids. */
+  pipelinePolicy?: PipelinePolicy
+  /** Consumer-side required stages; overrides the release's own list. */
+  requiredPipelineStages?: string[]
+  /** Largest image to download. Defaults to the client default (1 GiB). */
+  maxImageBytes?: number
   /** Skip CI/pipeline ack enforcement when selecting releases */
   skipPipelineCheck?: boolean
+  /** Command runner for docker; override to stub or to use another runtime. */
+  exec?: (cmd: string, args: string[], cwd?: string) => Promise<void>
+  fetch?: typeof fetch
 }
 
 export interface SidekarState {
@@ -90,6 +106,14 @@ export class Sidekar {
   private running = false
 
   constructor(config: SidekarConfig) {
+    // product becomes part of file names under workDir.
+    if (!isSafePathSegment(config.product)) {
+      throw new Error(`product "${config.product}" is not a safe name`)
+    }
+    const trustedOemKeys = config.trustedOemKeys?.length
+      ? config.trustedOemKeys
+      : undefined
+    const exec = config.exec ?? run
     this.config = {
       channel: 'stable',
       pollIntervalMs: 15_000,
@@ -102,9 +126,14 @@ export class Sidekar {
       pds: config.pds,
       authorDid: config.authorDid,
       trustedAuthors: config.trustedAuthors ?? [config.authorDid],
-      trustedOemKeys: config.trustedOemKeys,
+      trustedOemKeys,
+      requireOemSignature: config.requireOemSignature ?? Boolean(trustedOemKeys),
       attesterDids: config.attesterDids,
+      pipelinePolicy: config.pipelinePolicy,
+      requiredPipelineStages: config.requiredPipelineStages,
+      maxImageBytes: config.maxImageBytes,
       skipPipelineCheck: config.skipPipelineCheck ?? false,
+      fetch: config.fetch,
     })
 
     // Built-in apply handlers
@@ -116,6 +145,8 @@ export class Sidekar {
       await copyFile(art.path, target)
       log('package applied →', target)
     })
+
+    this.handlers.set('bundle', (art) => this.handlers.get('package')!(art))
 
     this.handlers.set('firmware', async (art) => {
       // IoT-style: write image for external flash tool / hook override
@@ -129,9 +160,9 @@ export class Sidekar {
       if (!this.config.dockerLoad) {
         throw new Error('container kind requires dockerLoad=true and docker CLI')
       }
-      await run('docker', ['load', '-i', art.path])
+      await exec('docker', ['load', '-i', art.path])
       if (this.config.composeProjectDir) {
-        await run(
+        await exec(
           'docker',
           ['compose', 'up', '-d', '--remove-orphans'],
           this.config.composeProjectDir,
@@ -147,7 +178,7 @@ export class Sidekar {
           art.path,
           path.join(this.config.composeProjectDir, 'bundle.bin'),
         )
-        await run(
+        await exec(
           'docker',
           ['compose', 'up', '-d', '--remove-orphans'],
           this.config.composeProjectDir,
@@ -185,9 +216,17 @@ export class Sidekar {
     })
     if (!art) return null
 
-    log('applying', art.kind, art.version, art.uri)
-    const handler = this.handlers.get(art.kind) ?? this.handlers.get('package')
+    // The client already binds the release to the requested product; this
+    // keeps the apply step safe even if a caller swaps the client.
+    if (art.product !== this.config.product) {
+      throw new Error(
+        `refusing to apply ${art.product}: this Sidekar manages ${this.config.product}`,
+      )
+    }
+    // No fallback: an unrecognised kind must not be applied as a package.
+    const handler = this.handlers.get(art.kind)
     if (!handler) throw new Error(`no apply handler for kind ${art.kind}`)
+    log('applying', art.kind, art.version, art.uri)
     await handler(art)
 
     await this.writeState({
