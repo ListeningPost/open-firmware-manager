@@ -171,3 +171,77 @@ export function openSealed(
   decipher.setAuthTag(tag)
   return Buffer.concat([decipher.update(enc), decipher.final()])
 }
+
+/** Control-plane job-signing key (Ed25519). Same encoding as device keys. */
+export interface ControlSigningKey {
+  /** Raw 32-byte Ed25519 public key (base64url) — pinned by devices */
+  ed25519PublicKey: string
+  /** PKCS8 PEM for Ed25519 private key — never leaves the control plane */
+  ed25519PrivateKeyPem: string
+}
+
+export function generateControlSigningKey(): ControlSigningKey {
+  const ed = generateKeyPairSync('ed25519')
+  const pub = ed.publicKey.export({ type: 'spki', format: 'der' })
+  return {
+    ed25519PublicKey: b64url(pub.subarray(pub.length - 32)),
+    ed25519PrivateKeyPem: ed.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+  }
+}
+
+/** Everything a control-plane job signature covers. */
+export interface JobSignatureFields {
+  /** Target device fingerprint (device id) */
+  fingerprint: string
+  jobId: string
+  kind: string
+  /** ISO timestamp set by the control plane when the job was issued */
+  issuedAt: string
+  sealed: SealedEnvelope
+}
+
+/** A job as delivered to the device: sealed payload + control-plane signature. */
+export interface SignedJob {
+  id: string
+  kind: string
+  issuedAt: string
+  sealed: SealedEnvelope
+  /** Ed25519 over {@link jobSigningPayload} (base64url) */
+  signature: string
+}
+
+/**
+ * Canonical bytes signed by the control plane for one job. A JSON array of
+ * strings is unambiguous regardless of what the individual fields contain.
+ */
+export function jobSigningPayload(f: JobSignatureFields): string {
+  return JSON.stringify([
+    'ofw-job-v1',
+    f.fingerprint,
+    f.jobId,
+    f.kind,
+    f.issuedAt,
+    f.sealed.epk,
+    f.sealed.nonce,
+    f.sealed.ct,
+  ])
+}
+
+export function signJob(controlPrivateKeyPem: string, f: JobSignatureFields): string {
+  return signDevicePayload(controlPrivateKeyPem, jobSigningPayload(f))
+}
+
+/** False for a missing, malformed, or wrong signature — never throws. */
+export function verifyJobSignature(
+  controlPublicKeyB64: string,
+  f: JobSignatureFields,
+  signatureB64: unknown,
+): boolean {
+  if (typeof signatureB64 !== 'string' || !signatureB64) return false
+  try {
+    if (fromB64url(controlPublicKeyB64).length !== 32) return false
+    return verifyDevicePayload(controlPublicKeyB64, jobSigningPayload(f), signatureB64)
+  } catch {
+    return false
+  }
+}

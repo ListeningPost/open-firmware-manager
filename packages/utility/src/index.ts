@@ -16,15 +16,24 @@ export class OpenFirmwareUtility {
     const res = await (this.cfg.fetchImpl ?? fetch)(url, {
       ...init,
       headers: {
-        authorization: `Bearer ${this.cfg.adminToken}`,
+        ...(this.cfg.adminToken ? { authorization: `Bearer ${this.cfg.adminToken}` } : {}),
         'content-type': 'application/json',
         ...(init?.headers || {}),
       },
     })
     const text = await res.text()
-    const json = text ? JSON.parse(text) : {}
     if (!res.ok) throw new Error(`${path} → ${res.status} ${text}`)
-    return json
+    return text ? JSON.parse(text) : {}
+  }
+
+  /** Public control-plane metadata, including the job-signing key devices pin. */
+  getMeta() {
+    return this.req('/v1/meta') as Promise<{
+      controlPublicKey: string
+      joins: number
+      enrollments: number
+      jobs: number
+    }>
   }
 
   listPendingJoins() {
@@ -34,6 +43,7 @@ export class OpenFirmwareUtility {
         product: string
         serial: string
         fingerprint: string
+        /** Derived by the control plane from the device key being approved. */
         mnemonic: string
         status: string
       }>
@@ -41,14 +51,14 @@ export class OpenFirmwareUtility {
   }
 
   approveJoin(joinId: string) {
-    return this.req(`/v1/join-requests/${joinId}/approve`, {
+    return this.req(`/v1/join-requests/${encodeURIComponent(joinId)}/approve`, {
       method: 'POST',
       body: '{}',
     }) as Promise<{ ok: boolean; enrollmentId: string }>
   }
 
   denyJoin(joinId: string) {
-    return this.req(`/v1/join-requests/${joinId}/deny`, {
+    return this.req(`/v1/join-requests/${encodeURIComponent(joinId)}/deny`, {
       method: 'POST',
       body: '{}',
     }) as Promise<{ ok: boolean }>

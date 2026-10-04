@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import {
@@ -15,9 +15,17 @@ export interface FactoryProfile {
   keys: DeviceKeyMaterial
   fingerprint: string
   mnemonic: string
-  factorySecret: string
+  /**
+   * Derived per-serial default (`KDF(factorySecret, serial)`). The fleet-wide
+   * factory secret itself is never written to the device.
+   */
   defaultPassword: string
   controlEndpoint: string
+  /**
+   * Control-plane Ed25519 job-signing key (base64url) pinned at the factory.
+   * When absent the agent pins the key it is given at first enrollment.
+   */
+  controlPublicKey?: string
   agentVersion: string
   createdAt: string
 }
@@ -30,6 +38,8 @@ export interface UserState {
   firmwareVersion: string
   appliedFirmwareSha256?: string
   joinRequestId?: string
+  /** Control-plane key pinned at enrollment (only when not factory-pinned). */
+  controlPublicKey?: string
   status: 'awaiting_enrollment' | 'enrolled' | 'quarantined'
   updatedAt: string
 }
@@ -41,6 +51,8 @@ export interface DevicePaths {
   factoryProfile: string
   userState: string
   firmwareImage: string
+  /** Replay guard for control-plane jobs; lives in factory/ so it survives reset. */
+  jobGuard: string
 }
 
 export function devicePaths(root: string): DevicePaths {
@@ -53,7 +65,25 @@ export function devicePaths(root: string): DevicePaths {
     factoryProfile: path.join(factoryDir, 'profile.json'),
     userState: path.join(userDir, 'state.json'),
     firmwareImage: path.join(userDir, 'firmware.bin'),
+    jobGuard: path.join(factoryDir, 'job-guard.json'),
   }
+}
+
+export const DEV_FACTORY_SECRET = 'ofw-dev-factory-secret'
+
+/** Device state holds private keys and passwords: owner-only, always. */
+export async function writePrivateFile(
+  file: string,
+  data: string | Uint8Array,
+): Promise<void> {
+  await writeFile(file, data, { mode: 0o600 })
+  // `mode` only applies on create; tighten files written by older versions too.
+  await chmod(file, 0o600)
+}
+
+async function mkdirPrivate(dir: string): Promise<void> {
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  await chmod(dir, 0o700)
 }
 
 export async function initFactoryProfile(
@@ -61,15 +91,25 @@ export async function initFactoryProfile(
   opts: {
     product: string
     serial: string
+    /** Fleet-wide secret; used once to derive the default password, not stored. */
     factorySecret?: string
     controlEndpoint?: string
+    /** Control-plane job-signing public key to pin (GET /v1/meta → controlPublicKey). */
+    controlPublicKey?: string
   },
 ): Promise<FactoryProfile> {
   const paths = devicePaths(root)
-  await mkdir(paths.factoryDir, { recursive: true })
-  await mkdir(paths.userDir, { recursive: true })
+  await mkdirPrivate(paths.factoryDir)
+  await mkdirPrivate(paths.userDir)
 
-  const factorySecret = opts.factorySecret ?? 'ofw-dev-factory-secret'
+  const factorySecret = opts.factorySecret || DEV_FACTORY_SECRET
+  if (factorySecret === DEV_FACTORY_SECRET) {
+    console.warn(
+      '[open-firmware/iot] WARNING: INSECURE DEFAULT FACTORY SECRET IN USE. ' +
+        'Default passwords derived from it are computable by anyone who knows the serial. ' +
+        'Pass a real `factorySecret` for anything other than local development.',
+    )
+  }
   const keys = generateDeviceKeys()
   const fingerprint = deviceFingerprint(opts.product, keys.ed25519PublicKey)
   const profile: FactoryProfile = {
@@ -78,13 +118,15 @@ export async function initFactoryProfile(
     keys,
     fingerprint,
     mnemonic: fingerprintMnemonic(fingerprint),
-    factorySecret,
     defaultPassword: factoryDefaultPassword(factorySecret, opts.serial),
     controlEndpoint: opts.controlEndpoint ?? 'http://127.0.0.1:8787',
+    ...(opts.controlPublicKey ? { controlPublicKey: opts.controlPublicKey } : {}),
     agentVersion: '0.1.0',
     createdAt: new Date().toISOString(),
   }
-  await writeFile(paths.factoryProfile, JSON.stringify(profile, null, 2))
+  await writePrivateFile(paths.factoryProfile, JSON.stringify(profile, null, 2))
+  // New identity: any replay guard left by a previous one is meaningless.
+  await rm(paths.jobGuard, { force: true })
   await restoreUserStateFromFactory(paths, profile)
   return profile
 }
@@ -103,9 +145,9 @@ export async function loadUserState(root: string): Promise<UserState> {
 
 export async function saveUserState(root: string, state: UserState): Promise<void> {
   const paths = devicePaths(root)
-  await mkdir(paths.userDir, { recursive: true })
+  await mkdirPrivate(paths.userDir)
   state.updatedAt = new Date().toISOString()
-  await writeFile(paths.userState, JSON.stringify(state, null, 2))
+  await writePrivateFile(paths.userState, JSON.stringify(state, null, 2))
 }
 
 async function restoreUserStateFromFactory(
@@ -120,8 +162,8 @@ async function restoreUserStateFromFactory(
     status: 'awaiting_enrollment',
     updatedAt: new Date().toISOString(),
   }
-  await mkdir(paths.userDir, { recursive: true })
-  await writeFile(paths.userState, JSON.stringify(state, null, 2))
+  await mkdirPrivate(paths.userDir)
+  await writePrivateFile(paths.userState, JSON.stringify(state, null, 2))
   return state
 }
 
@@ -153,4 +195,49 @@ export function publicIdentity(profile: FactoryProfile) {
     x25519PublicKey: profile.keys.x25519PublicKey,
     agentVersion: profile.agentVersion,
   }
+}
+
+export type JobStatus = 'ok' | 'failed' | 'unsupported'
+
+export interface SeenJob {
+  id: string
+  /** Epoch ms of the control plane's `issuedAt` */
+  issuedAt: number
+  status: JobStatus
+}
+
+/**
+ * Control-plane jobs this device has already accepted, so a captured job
+ * cannot be replayed — including after a factory reset.
+ */
+export interface JobGuard {
+  /** Jobs issued at or before this instant (epoch ms) are refused. */
+  floor: number
+  seen: SeenJob[]
+}
+
+const JOB_GUARD_MAX = 256
+
+export async function loadJobGuard(root: string): Promise<JobGuard> {
+  let raw: string
+  try {
+    raw = await readFile(devicePaths(root).jobGuard, 'utf8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { floor: 0, seen: [] }
+    throw e
+  }
+  // A corrupt guard throws: refusing jobs is safer than forgetting what was seen.
+  const g = JSON.parse(raw) as JobGuard
+  return { floor: Number(g.floor) || 0, seen: Array.isArray(g.seen) ? g.seen : [] }
+}
+
+export async function recordJobSeen(root: string, job: SeenJob): Promise<void> {
+  const guard = await loadJobGuard(root)
+  guard.seen.push(job)
+  guard.seen.sort((a, b) => a.issuedAt - b.issuedAt)
+  while (guard.seen.length > JOB_GUARD_MAX) {
+    const dropped = guard.seen.shift()!
+    guard.floor = Math.max(guard.floor, dropped.issuedAt)
+  }
+  await writePrivateFile(devicePaths(root).jobGuard, JSON.stringify(guard, null, 2))
 }
