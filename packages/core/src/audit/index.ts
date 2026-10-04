@@ -14,8 +14,12 @@ export interface AuditOptions {
   requireReady?: boolean
   blobAvailability?: Record<string, { available: boolean; size?: number; cid?: string }>
   requireBlobAvailability?: boolean
-  /** If set, OEM signature is required and must match one of these keys. */
+  /**
+   * If non-empty, a valid OEM signature from one of these keys is required
+   * (an unsigned release fails with OEM_SIG_MISSING).
+   */
   trustedOemKeys?: string[]
+  /** Require an OEM signature. Fails closed when no trusted keys are set. */
   requireOemSignature?: boolean
   expectedType?: string
   recordType?: string
@@ -57,6 +61,10 @@ export function auditReleaseChain(
     }
   }
 
+  if (!Number.isSafeInteger(release.imageSize) || release.imageSize < 0) {
+    push('SIZE_MISMATCH', `imageSize ${release.imageSize} is not a valid byte count`)
+  }
+
   if (release.chunkCount === 0) {
     if (release.imageSize !== 0) {
       push(
@@ -96,16 +104,14 @@ export function auditReleaseChain(
     )
   }
 
-  if (options.requireOemSignature) {
+  const trustedOemKeys = options.trustedOemKeys ?? []
+  if (options.requireOemSignature || trustedOemKeys.length > 0) {
     if (!release.oemSignature) {
       push('OEM_SIG_MISSING', 'OEM signature required by policy')
     } else {
-      const v = verifyOemSignature(release, options.trustedOemKeys ?? [])
+      const v = verifyOemSignature(release, trustedOemKeys)
       if (!v.ok) push('OEM_SIG_INVALID', v.reason ?? 'OEM signature invalid')
     }
-  } else if (release.oemSignature && (options.trustedOemKeys?.length ?? 0) > 0) {
-    const v = verifyOemSignature(release, options.trustedOemKeys ?? [])
-    if (!v.ok) push('OEM_SIG_INVALID', v.reason ?? 'OEM signature invalid')
   }
 
   const bySeq = new Map<number, ChunkMeta>()
@@ -139,6 +145,13 @@ export function auditReleaseChain(
       push(
         c.sha256 ? 'DIGEST_INVALID' : 'DIGEST_MISSING',
         `part seq ${c.seq} has invalid or missing sha256`,
+        c.seq,
+      )
+    }
+    if (!Number.isSafeInteger(c.byteLength) || c.byteLength < 0) {
+      push(
+        'LAYOUT_INVALID',
+        `part seq ${c.seq} byteLength ${c.byteLength} is not a valid byte count`,
         c.seq,
       )
     }

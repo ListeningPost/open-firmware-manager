@@ -78,7 +78,12 @@ export function verifyOemSignature(
   const sig = release.oemSignature
   if (!sig) return { ok: false, reason: 'missing oemSignature' }
   if (sig.alg !== 'ed25519') return { ok: false, reason: `unsupported alg ${sig.alg}` }
-  if (trustedKeys.length > 0 && !trustedKeys.includes(sig.publicKey)) {
+  // The key embedded in the record is attacker-controlled; it only counts when
+  // it is pinned by the consumer. No trusted keys means nothing can verify.
+  if (trustedKeys.length === 0) {
+    return { ok: false, reason: 'no trusted OEM keys configured' }
+  }
+  if (!trustedKeys.includes(sig.publicKey)) {
     return { ok: false, reason: 'oem public key is not in trustedOemKeys' }
   }
   try {

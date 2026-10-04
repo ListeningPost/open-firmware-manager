@@ -127,6 +127,80 @@ describe('auditPipelineAcks', () => {
   })
 })
 
+describe('consumer-side pipeline policy', () => {
+  const unguarded = () =>
+    baseRelease({
+      requirePipelineAcks: false,
+      pipelinePolicy: 'skipped',
+      requiredPipelineStages: [],
+    })
+
+  it('consumerMinPolicy cannot be lowered by the release record', () => {
+    const r = auditPipelineAcks(unguarded(), [], {
+      consumerMinPolicy: 'strict',
+      attesterDids: ['did:plc:ci'],
+    })
+    expect(r.policy).toBe('strict')
+    expect(r.ok).toBe(false)
+    expect(r.missingStages).toEqual(['build', 'test'])
+  })
+
+  it('consumerMinPolicy is satisfied by attester acks', () => {
+    const r = auditPipelineAcks(
+      unguarded(),
+      [
+        { ...ack('build', 'passed'), authorDid: 'did:plc:ci' },
+        { ...ack('test', 'passed'), authorDid: 'did:plc:ci' },
+      ],
+      { consumerMinPolicy: 'strict', attesterDids: ['did:plc:ci'] },
+    )
+    expect(r.ok).toBe(true)
+  })
+
+  it('consumer requiredStages override the release list', () => {
+    const r = auditPipelineAcks(
+      baseRelease({ requiredPipelineStages: ['lint'] }),
+      [ack('lint', 'passed')],
+      { requiredStages: ['build', 'security-scan'] },
+    )
+    expect(r.ok).toBe(false)
+    expect(r.missingStages).toEqual(['build', 'security-scan'])
+  })
+
+  it('a release may still raise the policy above the consumer floor', () => {
+    const r = auditPipelineAcks(baseRelease(), [], {
+      consumerMinPolicy: 'optional',
+    })
+    expect(r.policy).toBe('strict')
+  })
+
+  it('ignores acks bound to a different release CID', () => {
+    const r = auditPipelineAcks(baseRelease({ cid: 'bafynew' }), [
+      ack('build', 'passed'),
+      ack('test', 'passed'),
+    ])
+    expect(r.ok).toBe(false)
+    expect(r.missingStages).toEqual(['build', 'test'])
+  })
+
+  it('accepts acks bound to the same release CID', () => {
+    const r = auditPipelineAcks(baseRelease({ cid: 'bafy' }), [
+      ack('build', 'passed'),
+      ack('test', 'passed'),
+    ])
+    expect(r.ok).toBe(true)
+  })
+
+  it('with attesterDids, drops acks that carry no author at all', () => {
+    const anon = (stage: string) =>
+      ({ ...ack(stage, 'passed'), actor: undefined }) as unknown as PipelineAckRecord
+    const r = auditPipelineAcks(baseRelease(), [anon('build'), anon('test')], {
+      attesterDids: ['did:plc:ci'],
+    })
+    expect(r.ok).toBe(false)
+  })
+})
+
 describe('isReleaseInstallable', () => {
   it('requires status ready', () => {
     const r = isReleaseInstallable(

@@ -35,6 +35,9 @@ export interface AtpClientOptions {
   timeoutMs?: number
 }
 
+/** Default getBlob cap: a little above the 50 MB reference PDS upload limit. */
+export const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024
+
 function normalizePds(pds: string): string {
   return pds.replace(/\/$/, '')
 }
@@ -249,7 +252,17 @@ export class AtpClient {
     return out
   }
 
-  async getBlob(did: string, cid: string): Promise<Uint8Array> {
+  /**
+   * Download a blob, refusing to buffer more than `maxBytes`
+   * (default DEFAULT_MAX_BLOB_BYTES). The cap is enforced on Content-Length
+   * and again while streaming, so a lying or absent header cannot bypass it.
+   */
+  async getBlob(
+    did: string,
+    cid: string,
+    opts: { maxBytes?: number } = {},
+  ): Promise<Uint8Array> {
+    const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BLOB_BYTES
     const res = await this.request(
       'GET',
       'com.atproto.sync.getBlob',
@@ -258,7 +271,43 @@ export class AtpClient {
       undefined,
       false,
     )
-    return new Uint8Array(await res.arrayBuffer())
+    const tooLarge = (size: number | string) =>
+      new XRPCError({
+        status: res.status,
+        error: 'BlobTooLarge',
+        message: `blob ${cid} is ${size} bytes, limit ${maxBytes}`,
+        nsid: 'com.atproto.sync.getBlob',
+      })
+    const declared = Number(res.headers.get('content-length') ?? NaN)
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      await res.body?.cancel().catch(() => {})
+      throw tooLarge(declared)
+    }
+    if (!res.body) {
+      const buf = new Uint8Array(await res.arrayBuffer())
+      if (buf.byteLength > maxBytes) throw tooLarge(buf.byteLength)
+      return buf
+    }
+    const reader = res.body.getReader()
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {})
+        throw tooLarge(`more than ${maxBytes}`)
+      }
+      chunks.push(value)
+    }
+    const out = new Uint8Array(total)
+    let offset = 0
+    for (const c of chunks) {
+      out.set(c, offset)
+      offset += c.byteLength
+    }
+    return out
   }
 
   async describeServer(): Promise<{

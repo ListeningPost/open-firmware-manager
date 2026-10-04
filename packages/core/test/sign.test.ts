@@ -32,4 +32,34 @@ describe('OEM signatures', () => {
     )
     expect(bad.ok).toBe(false)
   })
+
+  it('fails closed when no trusted keys are configured', () => {
+    const oem = generateOemKey()
+    const meta = {
+      product: 'cam',
+      version: '1.2.3',
+      channel: 'stable' as const,
+      imageSha256: 'ab'.repeat(32),
+      imageSize: 99,
+    }
+    const sig = signRelease(oem.privateKeyPem, meta, oem.publicKey)
+    const res = verifyOemSignature({ ...meta, oemSignature: sig }, [])
+    expect(res.ok).toBe(false)
+    expect(res.reason).toMatch(/no trusted OEM keys/)
+  })
+
+  it('rejects a valid signature from a key that is not trusted', () => {
+    const oem = generateOemKey()
+    const attacker = generateOemKey()
+    const meta = {
+      product: 'cam',
+      version: '1.2.3',
+      channel: 'stable' as const,
+      imageSha256: 'ab'.repeat(32),
+      imageSize: 99,
+    }
+    const sig = signRelease(attacker.privateKeyPem, meta, attacker.publicKey)
+    const res = verifyOemSignature({ ...meta, oemSignature: sig }, [oem.publicKey])
+    expect(res.ok).toBe(false)
+  })
 })

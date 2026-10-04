@@ -3,7 +3,7 @@
  * Clients must still getRecord the author PDS and run Phase A/B.
  */
 import { AtpClient, parseAtUri, publicClient } from '@open-firmware/atproto-lite'
-import { COLLECTIONS, channelRkey } from '@open-firmware/core'
+import { COLLECTIONS, channelRkey, compareVersions } from '@open-firmware/core'
 import http from 'node:http'
 
 export interface IndexedRelease {
@@ -56,7 +56,7 @@ export class FirmwareAppView {
           r.channel === channel &&
           (!repo || r.repo === repo),
       )
-      .sort((a, b) => a.version < b.version ? 1 : -1)[0]
+      .sort((a, b) => compareVersions(b.version, a.version))[0]
   }
 
   listReleases(filter: {
