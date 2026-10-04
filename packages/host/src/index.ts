@@ -10,6 +10,7 @@ import {
   MAX_BLOB_BYTES,
   channelRkey,
   chunkBytes,
+  isSafePathSegment,
   releaseRkey,
   signRelease,
   stageKey,
@@ -74,6 +75,20 @@ export interface PipelineAckOptions {
   attesterDids?: string[]
 }
 
+/** Thrown by publishRelease when the product/version/channel was already published. */
+export class ReleaseExistsError extends Error {
+  readonly code = 'RELEASE_EXISTS'
+  constructor(
+    readonly rkey: string,
+    readonly existing?: StrongRef,
+  ) {
+    super(
+      `release ${rkey} already exists${existing ? ` (cid ${existing.cid})` : ''}; releases are immutable — publish a new version`,
+    )
+    this.name = 'ReleaseExistsError'
+  }
+}
+
 export class OpenFirmwareHost {
   private constructor(public readonly client: AtpClient) {}
 
@@ -94,6 +109,10 @@ export class OpenFirmwareHost {
   /**
    * Upload blobs, then create the immutable release once.
    * Gate + channel are sidecar records updated with swapRecord.
+   *
+   * Create-only: throws ReleaseExistsError if this product/version/channel was
+   * already published. Overwriting would let acks and gates issued for the old
+   * bytes vouch for new ones.
    */
   async publishRelease(opts: PublishReleaseOptions): Promise<PublishResult> {
     const channel = opts.channel ?? 'stable'
@@ -114,10 +133,21 @@ export class OpenFirmwareHost {
     const pipelinePolicy: PipelinePolicy =
       opts.pipelinePolicy ?? (skipPipeline ? 'skipped' : 'strict')
 
-    const bytes = new Uint8Array(await readFile(opts.file))
-    const planned = chunkBytes(bytes, { chunkSize })
+    // Consumers use these as file names and refuse anything else.
+    if (!isSafePathSegment(opts.product)) {
+      throw new Error(`product "${opts.product}" must match [A-Za-z0-9][A-Za-z0-9._+~-]*`)
+    }
+    if (!isSafePathSegment(opts.version)) {
+      throw new Error(`version "${opts.version}" must match [A-Za-z0-9][A-Za-z0-9._+~-]*`)
+    }
+
     const rkey = releaseRkey(opts.product, opts.version, channel)
     const chRkey = channelRkey(opts.product, channel)
+    const existing = await this.findRelease(rkey)
+    if (existing) throw new ReleaseExistsError(rkey, existing)
+
+    const bytes = new Uint8Array(await readFile(opts.file))
+    const planned = chunkBytes(bytes, { chunkSize })
     const now = new Date().toISOString()
 
     const parts: Array<Record<string, unknown>> = []
@@ -174,27 +204,16 @@ export class OpenFirmwareHost {
     log(`creating immutable release ${rkey}`)
     let releaseRef: StrongRef
     try {
-      const existing = await this.client.getRecord(
-        this.did,
+      releaseRef = await this.client.createRecord(
         COLLECTIONS.release,
-        rkey,
-      )
-      releaseRef = await this.client.putRecord(
-        COLLECTIONS.release,
-        rkey,
         releaseRecord,
-        { swapRecord: existing.cid },
+        rkey,
       )
     } catch (e) {
-      if (isMissingRecord(e)) {
-        releaseRef = await this.client.createRecord(
-          COLLECTIONS.release,
-          releaseRecord,
-          rkey,
-        )
-      } else {
-        throw e
-      }
+      // Lost a race with another publisher of the same version.
+      const raced = await this.findRelease(rkey).catch(() => null)
+      if (raced) throw new ReleaseExistsError(rkey, raced)
+      throw e
     }
 
     const gateState = skipPipeline ? 'ready' : 'awaiting-pipeline'
@@ -327,9 +346,9 @@ export class OpenFirmwareHost {
       )
     ).flat()
     const relevant = acks.filter((a) => {
-      if ((a.value.release as { uri?: string } | undefined)?.uri !== rec.uri) {
-        return false
-      }
+      const ref = a.value.release as { uri?: string; cid?: string } | undefined
+      // Bound to this exact record version, not just the URI.
+      if (ref?.uri !== rec.uri || ref?.cid !== rec.cid) return false
       if (opts.attesterDids?.length) {
         try {
           const did = parseAckDid(a.uri, a.value.actor)
@@ -392,6 +411,16 @@ export class OpenFirmwareHost {
         updatedAt: new Date().toISOString(),
       },
     )
+  }
+
+  private async findRelease(rkey: string): Promise<StrongRef | null> {
+    try {
+      const rec = await this.client.getRecord(this.did, COLLECTIONS.release, rkey)
+      return { uri: rec.uri, cid: rec.cid }
+    } catch (e) {
+      if (isMissingRecord(e)) return null
+      throw e
+    }
   }
 
   private async upsertSidecar(
