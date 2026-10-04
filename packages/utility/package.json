@@ -19,6 +19,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
     "start": "node dist/cli.js",
     "test": "echo ok"
   },

@@ -16,7 +16,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo ok",
     "clean": "rm -rf dist"
   },
   "dependencies": {
