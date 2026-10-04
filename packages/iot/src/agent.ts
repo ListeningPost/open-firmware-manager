@@ -1,16 +1,26 @@
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import {
   factoryReset,
   loadFactoryProfile,
+  loadJobGuard,
   loadUserState,
   publicIdentity,
+  recordJobSeen,
   saveUserState,
+  writePrivateFile,
   type FactoryProfile,
+  type JobStatus,
   type UserState,
 } from './factory.js'
 import { devicePaths } from './factory.js'
-import { openSealed, signDevicePayload, type SealedEnvelope } from './crypto.js'
-import { createHash } from 'node:crypto'
+import {
+  b64url,
+  openSealed,
+  signDevicePayload,
+  verifyJobSignature,
+  type SignedJob,
+} from './crypto.js'
+import { createHash, randomBytes } from 'node:crypto'
 
 export interface JoinRequestBody {
   product: string
@@ -27,6 +37,51 @@ export interface JoinRequestBody {
 export interface ControlClient {
   baseUrl: string
   fetchImpl?: typeof fetch
+}
+
+/** A `firmware.offer` job: a pointer to a release, never the bytes. */
+export interface FirmwareOffer {
+  releaseUri: string
+  imageSha256: string
+  version?: string
+  cid?: string
+}
+
+export interface IotDeviceAgentOptions {
+  /**
+   * Called for each authenticated `firmware.offer`. Wire this to the update
+   * client (e.g. `OpenFirmwareClient.downloadVerified` + `applyFirmwareBytes`);
+   * resolve once the update is installed, throw to report failure. Without a
+   * handler the offer is acked `unsupported` — never `ok`.
+   */
+  onFirmwareOffer?: (offer: FirmwareOffer) => Promise<void>
+}
+
+export interface JobResult {
+  id: string
+  kind: string
+  status: JobStatus
+  error?: string
+  /** Refused before decryption: unsigned, wrong signer, malformed, or too old. */
+  rejected?: boolean
+  /** Seen before; the original outcome is reported again, nothing was applied. */
+  replayed?: boolean
+  /** Whether the control plane accepted the ack. */
+  acked: boolean
+}
+
+type JobOutcome = Pick<JobResult, 'status' | 'error' | 'replayed'>
+
+/** Thrown for a valid job this device has no way to carry out. */
+export class UnsupportedJobError extends Error {}
+
+type JobPayload = {
+  kind: string
+  password?: string
+  version?: string
+  releaseUri?: string
+  cid?: string
+  imageSha256?: string
 }
 
 async function api(
@@ -50,10 +105,33 @@ async function api(
   return json
 }
 
+/**
+ * Signed device request headers. The nonce makes every signature single-use
+ * on the control plane.
+ */
+function deviceAuthHeaders(
+  profile: FactoryProfile,
+  method: string,
+  path: string,
+  status?: string,
+): Record<string, string> {
+  const ts = String(Date.now())
+  const nonce = b64url(randomBytes(16))
+  let payload = `${method} ${path}|${profile.fingerprint}|${ts}|${nonce}`
+  if (status !== undefined) payload += `|${status}`
+  return {
+    'x-ofw-fingerprint': profile.fingerprint,
+    'x-ofw-timestamp': ts,
+    'x-ofw-nonce': nonce,
+    'x-ofw-signature': signDevicePayload(profile.keys.ed25519PrivateKeyPem, payload),
+  }
+}
+
 export class IotDeviceAgent {
   constructor(
     public readonly root: string,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly opts: IotDeviceAgentOptions = {},
   ) {}
 
   async profile(): Promise<FactoryProfile> {
@@ -110,7 +188,14 @@ export class IotDeviceAgent {
     return { joinId: res.id, body: full }
   }
 
-  /** Poll enrollment status from control plane. */
+  /**
+   * Poll enrollment status from control plane.
+   *
+   * The control plane's job-signing key is pinned here: a factory-pinned key
+   * (`profile.controlPublicKey`) must match what the endpoint presents;
+   * otherwise the key presented at first enrollment is pinned until the next
+   * factory reset (trust on first use).
+   */
   async refreshEnrollment(): Promise<UserState> {
     const profile = await this.profile()
     const state = await this.state()
@@ -119,9 +204,27 @@ export class IotDeviceAgent {
       `/v1/devices/by-fingerprint/${profile.fingerprint}`,
       undefined,
       this.fetchImpl,
-    )) as { enrolled?: boolean; enrollmentId?: string; status?: string }
+    )) as {
+      enrolled?: boolean
+      enrollmentId?: string
+      status?: string
+      controlPublicKey?: string
+    }
 
     if (res.enrolled) {
+      const pinned = profile.controlPublicKey ?? state.controlPublicKey
+      if (pinned) {
+        if (res.controlPublicKey !== pinned) {
+          throw new Error(
+            'control plane key does not match the pinned key — refusing enrollment',
+          )
+        }
+      } else {
+        if (!res.controlPublicKey) {
+          throw new Error('control plane did not present a job-signing key')
+        }
+        state.controlPublicKey = res.controlPublicKey
+      }
       state.enrolled = true
       state.enrollmentId = res.enrollmentId
       state.status = 'enrolled'
@@ -131,103 +234,154 @@ export class IotDeviceAgent {
   }
 
   /**
-   * Pull sealed jobs, decrypt, apply (password / firmware package).
+   * Pull sealed jobs, authenticate, decrypt, apply. Returns the ids of jobs
+   * that were applied successfully; see {@link pullJobs} for every outcome.
    */
   async pullAndApplyJobs(): Promise<string[]> {
-    const profile = await this.profile()
-    const applied: string[] = []
-    const ts = String(Date.now())
-    const sig = signDevicePayload(
-      profile.keys.ed25519PrivateKeyPem,
-      `GET /v1/devices/me/jobs|${profile.fingerprint}|${ts}`,
-    )
-    const jobs = (await api(
-      profile.controlEndpoint,
-      `/v1/devices/me/jobs?fingerprint=${encodeURIComponent(profile.fingerprint)}`,
-      {
-        headers: {
-          'x-ofw-fingerprint': profile.fingerprint,
-          'x-ofw-timestamp': ts,
-          'x-ofw-signature': sig,
-        },
-      },
-      this.fetchImpl,
-    )) as { jobs: Array<{ id: string; kind: string; sealed: SealedEnvelope }> }
-
-    for (const job of jobs.jobs ?? []) {
-      try {
-        const plain = openSealed(profile.keys.x25519PrivateKeyPem, job.sealed)
-        const payload = JSON.parse(plain.toString('utf8')) as {
-          kind: string
-          password?: string
-          firmwareBase64?: string
-          version?: string
-          releaseUri?: string
-          cid?: string
-          imageSha256?: string
-        }
-        await this.applyJob(payload)
-        const ackTs = String(Date.now())
-        const ackSig = signDevicePayload(
-          profile.keys.ed25519PrivateKeyPem,
-          `POST /v1/jobs/${job.id}/ack|${profile.fingerprint}|${ackTs}|ok`,
-        )
-        await api(
-          profile.controlEndpoint,
-          `/v1/jobs/${job.id}/ack`,
-          {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              'x-ofw-fingerprint': profile.fingerprint,
-              'x-ofw-timestamp': ackTs,
-              'x-ofw-signature': ackSig,
-            },
-            body: JSON.stringify({ status: 'ok' }),
-          },
-          this.fetchImpl,
-        )
-        applied.push(job.id)
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        const ackTs = String(Date.now())
-        const ackSig = signDevicePayload(
-          profile.keys.ed25519PrivateKeyPem,
-          `POST /v1/jobs/${job.id}/ack|${profile.fingerprint}|${ackTs}|failed`,
-        )
-        await api(
-          profile.controlEndpoint,
-          `/v1/jobs/${job.id}/ack`,
-          {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              'x-ofw-fingerprint': profile.fingerprint,
-              'x-ofw-timestamp': ackTs,
-              'x-ofw-signature': ackSig,
-            },
-            body: JSON.stringify({ status: 'failed', error: msg }),
-          },
-          this.fetchImpl,
-        ).catch(() => {})
-      }
-    }
-    return applied
+    const results = await this.pullJobs()
+    return results.filter((r) => r.status === 'ok' && !r.replayed).map((r) => r.id)
   }
 
-  private async applyJob(payload: {
-    kind: string
-    password?: string
-    firmwareBase64?: string
-    version?: string
-    releaseUri?: string
-    cid?: string
-    imageSha256?: string
-  }): Promise<void> {
-    const state = await this.state()
-    const paths = devicePaths(this.root)
+  /**
+   * Pull jobs and report what happened to each. A job is only opened if it is
+   * signed by the pinned control-plane key for this device and has not been
+   * seen before; anything else is refused without being decrypted.
+   */
+  async pullJobs(): Promise<JobResult[]> {
+    const profile = await this.profile()
+    const controlKey = profile.controlPublicKey ?? (await this.state()).controlPublicKey
+    if (!controlKey) {
+      throw new Error('no control plane key pinned — enroll first or provision one at the factory')
+    }
+    const path = '/v1/devices/me/jobs'
+    const res = (await api(
+      profile.controlEndpoint,
+      `${path}?fingerprint=${encodeURIComponent(profile.fingerprint)}`,
+      { headers: deviceAuthHeaders(profile, 'GET', path) },
+      this.fetchImpl,
+    )) as { jobs?: Array<Partial<SignedJob>> }
+
+    const results: JobResult[] = []
+    for (const job of res.jobs ?? []) {
+      const id = typeof job.id === 'string' ? job.id : ''
+      const kind = typeof job.kind === 'string' ? job.kind : ''
+      let outcome: JobOutcome
+      try {
+        outcome = await this.processJob(profile, controlKey, job)
+      } catch (e) {
+        // Not authentic: refuse, and do not ack — an ack would let a forged
+        // job with a real job's id change that job's status on the server.
+        results.push({
+          id,
+          kind,
+          status: 'failed',
+          error: e instanceof Error ? e.message : String(e),
+          rejected: true,
+          acked: false,
+        })
+        continue
+      }
+      const acked = await this.ack(profile, id, outcome.status, outcome.error)
+      results.push({ id, kind, ...outcome, acked })
+    }
+    return results
+  }
+
+  /**
+   * Authenticate one job, then apply it at most once. Throws if the job is
+   * not authentic; otherwise returns what happened when it was applied.
+   */
+  private async processJob(
+    profile: FactoryProfile,
+    controlKey: string,
+    job: Partial<SignedJob>,
+  ): Promise<JobOutcome> {
+    const { id, kind, issuedAt, sealed, signature } = job
+    if (typeof signature !== 'string' || !signature) {
+      throw new Error('job is not signed by the control plane')
+    }
+    if (
+      typeof id !== 'string' ||
+      typeof kind !== 'string' ||
+      typeof issuedAt !== 'string' ||
+      !sealed ||
+      typeof sealed.epk !== 'string' ||
+      typeof sealed.nonce !== 'string' ||
+      typeof sealed.ct !== 'string'
+    ) {
+      throw new Error('malformed job')
+    }
+    const fields = { fingerprint: profile.fingerprint, jobId: id, kind, issuedAt, sealed }
+    if (!verifyJobSignature(controlKey, fields, signature)) {
+      throw new Error('job signature invalid')
+    }
+    const issuedMs = Date.parse(issuedAt)
+    if (!Number.isFinite(issuedMs)) throw new Error('job issuedAt invalid')
+
+    const guard = await loadJobGuard(this.root)
+    const seen = guard.seen.find((s) => s.id === id)
+    if (seen) {
+      // Already handled (e.g. our ack was lost). Report the original outcome
+      // again, but never apply twice.
+      return {
+        status: seen.status,
+        error: 'job already processed (replay) — not applied again',
+        replayed: true,
+      }
+    }
+    if (issuedMs <= guard.floor) throw new Error('job older than replay window (replay)')
+
+    let outcome: JobOutcome
+    try {
+      const plain = openSealed(profile.keys.x25519PrivateKeyPem, sealed)
+      const payload = JSON.parse(plain.toString('utf8')) as JobPayload
+      if (payload.kind !== kind) throw new Error('sealed job kind does not match signed kind')
+      await this.applyJob(payload)
+      outcome = { status: 'ok' }
+    } catch (e) {
+      outcome = {
+        status: e instanceof UnsupportedJobError ? 'unsupported' : 'failed',
+        error: e instanceof Error ? e.message : String(e),
+      }
+    }
+    // Authentic job: remember it whatever the outcome, so it runs at most once.
+    await recordJobSeen(this.root, { id, issuedAt: issuedMs, status: outcome.status })
+    return outcome
+  }
+
+  private async ack(
+    profile: FactoryProfile,
+    jobId: string,
+    status: JobStatus,
+    error?: string,
+  ): Promise<boolean> {
+    const path = `/v1/jobs/${encodeURIComponent(jobId)}/ack`
+    try {
+      await api(
+        profile.controlEndpoint,
+        path,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...deviceAuthHeaders(profile, 'POST', path, status),
+          },
+          body: JSON.stringify(error ? { status, error } : { status }),
+        },
+        this.fetchImpl,
+      )
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private async applyJob(payload: JobPayload): Promise<void> {
     if (payload.kind === 'credential.set' || payload.kind === 'credential.rotate') {
-      if (!payload.password) throw new Error('password missing')
+      if (typeof payload.password !== 'string' || !payload.password) {
+        throw new Error('password missing')
+      }
+      const state = await this.state()
       state.password = payload.password
       state.passwordRotated = true
       await saveUserState(this.root, state)
@@ -239,19 +393,34 @@ export class IotDeviceAgent {
       )
     }
     if (payload.kind === 'firmware.offer') {
+      if (typeof payload.releaseUri !== 'string' || typeof payload.imageSha256 !== 'string') {
+        throw new Error('firmware.offer requires releaseUri and imageSha256')
+      }
       if (!payload.releaseUri || !payload.imageSha256) {
         throw new Error('firmware.offer requires releaseUri and imageSha256')
       }
-      // Signal only — bytes must be pulled with OpenFirmwareClient.downloadVerified.
+      // The offer is only a pointer. Bytes must be pulled and verified by the
+      // embedding application; without that we must not claim success.
+      if (!this.opts.onFirmwareOffer) {
+        throw new UnsupportedJobError(
+          'firmware.offer is not supported: no onFirmwareOffer handler configured',
+        )
+      }
+      await this.opts.onFirmwareOffer({
+        releaseUri: payload.releaseUri,
+        imageSha256: payload.imageSha256,
+        ...(payload.version !== undefined ? { version: payload.version } : {}),
+        ...(payload.cid !== undefined ? { cid: payload.cid } : {}),
+      })
       return
     }
-    throw new Error(`unknown job kind ${payload.kind}`)
+    throw new UnsupportedJobError(`unknown job kind ${payload.kind}`)
   }
 
   /** Apply a local firmware file (for synthetic OTA tests via client path). */
   async applyFirmwareBytes(bytes: Uint8Array, version: string): Promise<void> {
     const paths = devicePaths(this.root)
-    await writeFile(paths.firmwareImage, bytes)
+    await writePrivateFile(paths.firmwareImage, bytes)
     const state = await this.state()
     state.firmwareVersion = version
     state.appliedFirmwareSha256 = createHash('sha256').update(bytes).digest('hex')
