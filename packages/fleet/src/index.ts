@@ -15,7 +15,9 @@ async function upsert(
     const existing = await client.getRecord(client.did, collection, rkey)
     return client.putRecord(collection, rkey, record, { swapRecord: existing.cid })
   } catch (e) {
-    if (e instanceof XRPCError && (e.status === 400 || e.status === 404)) {
+    // Only a missing record means "create". Any other 400 (InvalidSwap,
+    // validation, auth) must surface instead of being retried as a create.
+    if (e instanceof XRPCError && e.isMissingRecord) {
       return client.createRecord(collection, record, rkey)
     }
     throw e
