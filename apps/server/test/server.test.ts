@@ -39,6 +39,7 @@ async function call(
   method: string,
   p: string,
   opts: { headers?: Record<string, string>; body?: unknown } = {},
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- loosely typed JSON keeps assertions readable
 ): Promise<{ status: number; json: any; headers: Headers }> {
   const res = await fetch(base + p, {
     method,

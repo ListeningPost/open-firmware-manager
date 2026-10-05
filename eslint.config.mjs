@@ -12,6 +12,7 @@ export default tseslint.config(
       "**/node_modules/**",
       "**/coverage/**",
       "cli/target/**",
+      ".claude/**",
       "examples/full-stack/.local/**",
     ],
   },

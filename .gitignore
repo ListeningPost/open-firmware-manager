@@ -16,3 +16,6 @@ tmp/
 cli/target/
 examples/full-stack/pds.secrets.env
 examples/full-stack/.local/
+
+# Claude Code agent worktrees
+.claude/
