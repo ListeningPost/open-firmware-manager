@@ -6,18 +6,9 @@ import fs from 'node:fs'
 import { writeFile, mkdtemp, rm } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { createRequire } from 'node:module'
-
-const require = createRequire(import.meta.url)
-
-// Resolve workspace packages (Docker monorepo layout or local node_modules)
-function loadHost() {
-  try {
-    return require('@open-firmware/host')
-  } catch {
-    return require('../../../../packages/host/dist/index.js')
-  }
-}
+import { createPrivateKey, createPublicKey } from 'node:crypto'
+import { OpenFirmwareHost } from '@open-firmware/host'
+import { verifyOemSignature } from '@open-firmware/core'
 
 const PORT = Number(process.env.PORT || 8099)
 const PDS_URL = (process.env.PDS_URL || 'http://pds:2583').replace(/\/$/, '')
@@ -27,14 +18,37 @@ const RUNNER_HEALTH = (process.env.RUNNER_HEALTH || 'http://pipeline-runner:9091
   /\/$/,
   '',
 )
+const CONTROL_URL = (process.env.CONTROL_URL || 'http://control:8787').replace(/\/$/, '')
+// The control plane never hands its admin token out; this service is given it.
+const ADMIN_TOKEN = process.env.OFW_ADMIN_TOKEN || ''
 const AUTHOR_DID_FILE = process.env.AUTHOR_DID_FILE || '/config/author.did'
+const ATTESTER_DID_FILE = process.env.ATTESTER_DID_FILE || '/config/attester.did'
 const OFW_IDENTIFIER = process.env.OFW_IDENTIFIER || 'publisher.pds.test'
 const OFW_PASSWORD = process.env.OFW_PASSWORD || 'publisher-pass-change-me'
 const PRODUCT = process.env.PRODUCT || 'demo-site'
+const REQUIRED_STAGES = ['build', 'test']
+// Same trust anchors Sidekar is configured with, so this page can show the
+// verdict Sidekar will reach for every release.
+const TRUSTED_OEM_KEYS = (process.env.OFW_TRUSTED_OEM_KEYS || '')
+  .split(',')
+  .map((k) => k.trim())
+  .filter(Boolean)
+// This service plays the publisher's workstation in the browser demo, so it is
+// handed the OEM private key (base64 of the PKCS#8 PEM). Demo only.
+const OEM_KEY_PEM = process.env.OFW_OEM_KEY_B64
+  ? Buffer.from(process.env.OFW_OEM_KEY_B64, 'base64').toString('utf8')
+  : ''
+const OEM_PUBLIC_KEY = OEM_KEY_PEM ? rawPublicKey(OEM_KEY_PEM) : ''
 const COL_RELEASE = 'app.openfirmware.firmware.release'
 const COL_ACK = 'app.openfirmware.firmware.pipelineAck'
 const COL_GATE = 'app.openfirmware.firmware.gate'
 const COL_CHANNEL = 'app.openfirmware.firmware.channel'
+
+/** Raw Ed25519 public key (unpadded base64url) of a PKCS#8 PEM private key. */
+function rawPublicKey(pem) {
+  const spki = createPublicKey(createPrivateKey(pem)).export({ type: 'spki', format: 'der' })
+  return spki.subarray(spki.length - 32).toString('base64url')
+}
 
 /** Recent action log for the UI */
 const actionLog = []
@@ -43,12 +57,68 @@ function pushLog(entry) {
   if (actionLog.length > 20) actionLog.length = 20
 }
 
-function readAuthorDid() {
+function readDid(file) {
   try {
-    return fs.readFileSync(AUTHOR_DID_FILE, 'utf8').trim()
+    return fs.readFileSync(file, 'utf8').trim() || null
   } catch {
     return null
   }
+}
+const readAuthorDid = () => readDid(AUTHOR_DID_FILE)
+const readAttesterDid = () => readDid(ATTESTER_DID_FILE)
+
+function cmpVersion(a, b) {
+  const pa = String(a).split('.').map(Number)
+  const pb = String(b).split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0)
+    if (d) return d
+  }
+  return 0
+}
+
+/**
+ * The verdict Sidekar reaches for a release, from the same public records and
+ * the same trust anchors: pinned OEM key, CI attester acks bound to the
+ * release CID, gate ready and still naming this exact record.
+ */
+function sidekarVerdict(value, cid, gate, attesterAcks) {
+  const reasons = []
+  const oem = TRUSTED_OEM_KEYS.length
+    ? verifyOemSignature(
+        {
+          product: value.product,
+          version: value.version,
+          channel: value.channel || 'stable',
+          imageSha256: String(value.imageSha256),
+          imageSize: Number(value.imageSize),
+          oemSignature: value.oemSignature,
+        },
+        TRUSTED_OEM_KEYS,
+      )
+    : { ok: false, reason: 'no trusted OEM key configured' }
+  const oemState = oem.ok
+    ? 'valid'
+    : !value.oemSignature
+      ? 'missing'
+      : oem.reason === 'signature mismatch'
+        ? 'invalid'
+        : 'untrusted'
+  if (!oem.ok) reasons.push(`OEM signature ${oemState}${oem.reason ? ` (${oem.reason})` : ''}`)
+
+  const passed = new Set(
+    attesterAcks
+      .filter((a) => a.releaseCid === cid && (a.result === 'passed' || a.result === 'skipped'))
+      .map((a) => a.stage),
+  )
+  const missing = REQUIRED_STAGES.filter((st) => !passed.has(st))
+  if (missing.length) reasons.push(`no CI attestation for ${missing.join(', ')}`)
+
+  if (!gate) reasons.push('no gate record')
+  else if (gate.state !== 'ready') reasons.push(`gate is ${gate.state}`)
+  else if (gate.releaseCid !== cid) reasons.push('release record was rewritten after the gate was set')
+
+  return { oem: oemState, attested: missing.length === 0, installable: reasons.length === 0, reasons }
 }
 
 async function safeFetch(url, ms = 3000) {
@@ -113,7 +183,7 @@ function pipelineSummary(release, acksForRelease) {
     }
   }
 
-  let gate = 'n/a'
+  let gate
   if (policy === 'skipped' || !require) gate = 'skipped (no CI required)'
   else if (release.status === 'awaiting-pipeline') gate = 'waiting on CI'
   else if (release.status === 'failed') gate = 'failed'
@@ -158,7 +228,7 @@ async function gatherStatus() {
 
   let releases = []
   let allAcks = []
-  const gatesByRkey = new Map()
+  const attesterDid = readAttesterDid()
 
   if (authorDid && pdsHealth.ok) {
     const listRecords = await listAllRecords(authorDid, COL_RELEASE)
@@ -167,13 +237,20 @@ async function gatherStatus() {
     const liveUris = new Set(
       channelRecords.map((c) => c.value?.release?.uri).filter(Boolean),
     )
+    const gatesByRkey = new Map()
     for (const g of gateRecords) {
-      gatesByRkey.set(g.uri?.split('/').pop(), g.value?.state)
+      gatesByRkey.set(g.uri?.split('/').pop(), {
+        state: g.value?.state,
+        releaseCid: g.value?.release?.cid,
+      })
     }
-    const ackRecords = await listAllRecords(authorDid, COL_ACK)
+    // Only the independent CI account's acks count; the publisher vouching
+    // for itself is not attestation.
+    const ackRecords = attesterDid ? await listAllRecords(attesterDid, COL_ACK) : []
     allAcks = ackRecords.map((r) => ({
       uri: r.uri,
       releaseUri: r.value?.release?.uri,
+      releaseCid: r.value?.release?.cid,
       stage: r.value?.stage,
       result: r.value?.result,
       createdAt: r.value?.createdAt,
@@ -182,50 +259,59 @@ async function gatherStatus() {
       actor: r.value?.actor,
     }))
 
-    if (listRecords.length) {
-      releases = listRecords.map((r) => {
+    releases = listRecords
+      .filter((r) => r.value?.product === PRODUCT)
+      .map((r) => {
         const value = r.value || {}
         const rkey = r.uri?.split('/').pop()
-        const status = gatesByRkey.get(rkey) || 'unknown'
-        const acksFor = allAcks.filter((a) => a.releaseUri === r.uri)
+        const gate = gatesByRkey.get(rkey)
+        const status = gate?.state || 'unknown'
+        const acksFor = allAcks.filter((a) => a.releaseUri === r.uri && a.releaseCid === r.cid)
         const pipeline = pipelineSummary(
           {
             status,
-            requirePipelineAcks: value.requirePipelineAcks,
-            requiredPipelineStages: value.requiredPipelineStages,
-            pipelinePolicy: value.pipelinePolicy,
+            requirePipelineAcks: true,
+            requiredPipelineStages: REQUIRED_STAGES,
+            pipelinePolicy: 'strict',
           },
           acksFor,
         )
         return {
           uri: r.uri,
+          cid: r.cid,
           rkey,
           version: value.version,
           product: value.product,
           status,
           channel: value.channel,
           imageSize: value.imageSize,
-          requirePipelineAcks: Boolean(value.requirePipelineAcks),
-          pipelinePolicy: value.pipelinePolicy || 'skipped',
-          requiredPipelineStages: value.requiredPipelineStages || [],
+          createdAt: value.createdAt,
+          declaredPolicy: value.pipelinePolicy || (value.requirePipelineAcks ? 'strict' : 'skipped'),
+          oemKeyId: value.oemSignature?.keyId || null,
           pipeline,
           acks: acksFor,
           live: liveUris.has(r.uri),
+          verdict: sidekarVerdict(value, r.cid, gate, acksFor),
         }
       })
-    }
+      .sort((x, y) => cmpVersion(y.version, x.version))
   }
 
+  const iot = await gatherIot()
+
   const awaiting = releases.filter((r) => r.status === 'awaiting-pipeline')
-  const ready = releases.filter((r) => r.status === 'ready')
 
   return {
     at: new Date().toISOString(),
     authorDid,
+    attesterDid,
+    trustedOemKeys: TRUSTED_OEM_KEYS,
+    iot,
     counts: {
       releases: releases.length,
       awaitingPipeline: awaiting.length,
-      ready: ready.length,
+      installable: releases.filter((r) => r.verdict.installable).length,
+      refused: releases.filter((r) => r.status === 'ready' && !r.verdict.installable).length,
       pipelineAcks: allAcks.length,
     },
     services: {
@@ -237,15 +323,15 @@ async function gatherStatus() {
         detail: pdsHealth.json || pdsHealth.error || pdsHealth.text,
       },
       runner: {
-        name: 'Pipeline runner (Docker container)',
-        note: 'CI/validator container — posts pipeline-ack; not the installer',
+        name: 'CI attester (pipeline-runner container)',
+        note: 'Independent account; writes pipeline acks only — cannot promote or install',
         kind: 'container',
         healthy: runnerHealth.ok,
         detail: runnerHealth.json || runnerHealth.error,
       },
       sidekar: {
         name: 'Sidekar (Docker container)',
-        note: 'Installer container — applies ready releases only',
+        note: 'Installer — requires the pinned OEM key and the CI attester, then applies',
         kind: 'container',
         healthy: sidekarHealth.ok,
         detail: sidekarHealth.json || sidekarHealth.error,
@@ -256,6 +342,13 @@ async function gatherStatus() {
         kind: 'container',
         healthy: demoHealth.ok,
         message: demoMsg.json?.message || demoMsg.error || null,
+      },
+      control: {
+        name: 'IoT control plane (control container)',
+        url: 'http://localhost:8787/v1/meta',
+        note: 'Device join approval and signed, sealed jobs',
+        kind: 'container',
+        healthy: iot.healthy,
       },
       walkthrough: {
         name: 'This walkthrough (Docker container)',
@@ -270,8 +363,100 @@ async function gatherStatus() {
   }
 }
 
-async function doPublish({ message, requirePipeline }) {
-  const { OpenFirmwareHost } = loadHost()
+async function controlGet(pathname) {
+  const ac = new AbortController()
+  const t = setTimeout(() => ac.abort(), 3000)
+  try {
+    const res = await fetch(`${CONTROL_URL}${pathname}`, {
+      signal: ac.signal,
+      headers: ADMIN_TOKEN ? { authorization: `Bearer ${ADMIN_TOKEN}` } : {},
+    })
+    return res.ok ? await res.json() : null
+  } catch {
+    return null
+  } finally {
+    clearTimeout(t)
+  }
+}
+
+async function gatherIot() {
+  const meta = await controlGet('/v1/meta')
+  if (!meta) return { healthy: false, pending: [], devices: [], jobs: [] }
+  const [joins, devices, jobs] = await Promise.all([
+    controlGet('/v1/join-requests'),
+    controlGet('/v1/devices'),
+    controlGet('/v1/jobs'),
+  ])
+  return {
+    healthy: true,
+    controlPublicKey: meta.controlPublicKey,
+    pending: (joins?.joins || []).map((j) => ({
+      id: j.id,
+      product: j.product,
+      serial: j.serial,
+      mnemonic: j.mnemonic,
+    })),
+    devices: (devices?.devices || []).map((d) => ({
+      serial: d.serial,
+      product: d.product,
+      status: d.status,
+      fingerprint: String(d.fingerprint || '').slice(0, 16),
+    })),
+    jobs: (jobs?.jobs || []).map((j) => ({
+      id: j.id,
+      kind: j.kind,
+      status: j.status,
+      fingerprint: String(j.fingerprint || '').slice(0, 16),
+    })),
+  }
+}
+
+/** One patch above the highest version ever published (releases are immutable). */
+async function nextVersion(authorDid) {
+  let max = '1.0.0'
+  for (const r of await listAllRecords(authorDid, COL_RELEASE)) {
+    const v = String(r.value?.version || '')
+    if (r.value?.product === PRODUCT && /^\d+\.\d+\.\d+$/.test(v) && cmpVersion(v, max) > 0) {
+      max = v
+    }
+  }
+  const [maj, min, patch] = max.split('.').map(Number)
+  return `${maj}.${min}.${patch + 1}`
+}
+
+/**
+ * Publisher step after CI: promote once the attester's acks are in. Only acks
+ * from the CI DID are counted. Runs in the background for releases this page
+ * published; CLI-published releases are promoted with `ofw pipeline-promote`.
+ */
+async function promoteWhenAttested(host, rkey, attesterDid) {
+  const deadline = Date.now() + 90_000
+  while (Date.now() < deadline) {
+    try {
+      const ref = await host.tryPromoteRelease(rkey, { attesterDids: [attesterDid] })
+      if (ref) {
+        pushLog({ action: 'promote', ok: true, message: `${rkey} promoted on CI attester acks` })
+        return
+      }
+    } catch (e) {
+      console.log('[walkthrough promote]', e.message || e)
+    }
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  pushLog({ action: 'promote', ok: false, error: `${rkey}: no CI attestation within 90s` })
+}
+
+/**
+ * mode 'signed'  — the legitimate publisher: OEM-signed, CI gate required.
+ * mode 'attack'  — an attacker with the stolen PDS password: no OEM key,
+ *                  CI skipped, pushed straight to the channel.
+ */
+async function doPublish({ message, mode }) {
+  const attack = mode === 'attack'
+  const attesterDid = readAttesterDid()
+  if (!attack && (!OEM_KEY_PEM || !attesterDid)) {
+    throw new Error('walkthrough has no OEM key or attester DID; run ./scripts/demo-setup.sh and restart')
+  }
   const host = await OpenFirmwareHost.login({
     pds: PDS_URL,
     identifier: OFW_IDENTIFIER,
@@ -283,9 +468,7 @@ async function doPublish({ message, requirePipeline }) {
     message?.trim() ||
     `Walkthrough update ${new Date().toISOString()}`
   await writeFile(file, text, 'utf8')
-  // Full ms timestamp so versions stay monotonic (last-6-digits wrapped every ~16m
-  // and Sidekar refused "older" releases).
-  const version = `1.${Date.now()}.0`
+  const version = await nextVersion(host.did)
   try {
     const result = await host.publishRelease({
       product: PRODUCT,
@@ -293,30 +476,32 @@ async function doPublish({ message, requirePipeline }) {
       channel: 'stable',
       kind: 'package',
       file,
-      skipPipeline: !requirePipeline,
-      requiredPipelineStages: requirePipeline ? ['build', 'test'] : [],
-      pipelinePolicy: requirePipeline ? 'strict' : 'skipped',
+      skipPipeline: attack,
+      requiredPipelineStages: attack ? [] : REQUIRED_STAGES,
+      pipelinePolicy: attack ? 'skipped' : 'strict',
+      ...(attack
+        ? {}
+        : { oemPrivateKeyPem: OEM_KEY_PEM, oemPublicKey: OEM_PUBLIC_KEY, oemKeyId: 'demo-oem-1' }),
       onProgress: (m) => console.log('[walkthrough publish]', m),
     })
     pushLog({
-      action: requirePipeline ? 'publish_with_pipeline' : 'publish_skip_ci',
-      ok: true,
-      message: text,
-      version: result.version ?? version,
-      rkey: result.rkey,
-      status: result.gateState,
-      uri: result.release?.uri,
-    })
-    return {
+      action: attack ? 'ATTACK: unsigned publish, CI skipped' : 'publish (OEM-signed, CI gate)',
       ok: true,
       message: text,
       version,
       rkey: result.rkey,
       status: result.gateState,
+      uri: result.release?.uri,
+    })
+    if (!attack) void promoteWhenAttested(host, result.rkey, attesterDid)
+    return {
+      ok: true,
+      mode: attack ? 'attack' : 'signed',
+      message: text,
+      version,
+      rkey: result.rkey,
+      status: result.gateState,
       uri: result.release.uri,
-      note: requirePipeline
-        ? 'Awaiting pipeline-runner acks, then Sidekar will install.'
-        : 'Marked ready — Sidekar should install within a few seconds.',
     }
   } finally {
     await rm(dir, { recursive: true, force: true })
@@ -359,21 +544,20 @@ function page(status) {
     })
     .join('')
 
+  const SHOWN = 8
   const releaseCards =
     status.releases.length === 0
-      ? '<p class="muted">No releases yet — use a button below to publish.</p>'
+      ? '<p class="muted">No releases yet — use a button above, or <code>./scripts/demo-happy-path.sh</code>.</p>'
       : status.releases
+          .slice(0, SHOWN)
           .map((r) => {
-            const stages =
-              r.pipeline.stageRows.length === 0
-                ? '<p class="muted" style="margin:0.4rem 0 0">No CI stages required (pipeline skipped).</p>'
-                : `<table class="tight">
-              <thead><tr><th>Stage</th><th>Result</th><th>When</th><th>Note</th></tr></thead>
+            const stages = `<table class="tight">
+              <thead><tr><th>CI stage</th><th>Attested by CI account</th><th>When</th><th>Note</th></tr></thead>
               <tbody>
               ${r.pipeline.stageRows
                 .map(
                   (s) => `<tr>
-                  <td><code>${esc(s.stage)}</code>${s.extra ? ' <span class="muted">(extra)</span>' : ''}</td>
+                  <td><code>${esc(s.stage)}</code></td>
                   <td>${resultBadge(s.result)}</td>
                   <td class="muted">${esc(s.createdAt || '—')}</td>
                   <td class="muted">${esc(s.summary || (s.runUrl ? s.runUrl : '—'))}</td>
@@ -381,29 +565,87 @@ function page(status) {
                 )
                 .join('')}
               </tbody></table>`
+            const v = r.verdict
+            const oem =
+              v.oem === 'valid'
+                ? '<span class="ok">valid — pinned OEM key</span>'
+                : v.oem === 'untrusted'
+                  ? '<span class="bad">signed by an untrusted key</span>'
+                  : v.oem === 'invalid'
+                    ? '<span class="bad">invalid — does not match this record</span>'
+                    : '<span class="bad">missing</span>'
+            const verdict = v.installable
+              ? `<span class="ok">${r.live ? 'ACCEPTED — live on the channel' : 'acceptable (superseded)'}</span>`
+              : r.status === 'awaiting-pipeline'
+                ? '<span class="warn">not offered to devices yet (awaiting CI)</span>'
+                : `<span class="bad">REFUSED</span> <span class="muted">${esc(v.reasons.join('; '))}</span>`
 
-            return `<div class="rel">
+            return `<div class="rel${!v.installable && r.status === 'ready' ? ' rel-bad' : ''}">
               <div class="rel-head">
                 <div>
                   <strong>${esc(r.product)}</strong>
                   <code>v${esc(r.version)}</code>
-                  ${statusBadge(r.status)}
+                  gate ${statusBadge(r.status)}
+                  ${r.live ? '<span class="pill">channel points here</span>' : ''}
                 </div>
-                <div class="muted">gate: ${esc(r.pipeline.gate)}</div>
+                <div>Sidekar: ${verdict}</div>
               </div>
               <div class="muted" style="font-size:0.8rem;margin:0.35rem 0">
-                policy=<code>${esc(r.pipelinePolicy)}</code>
-                · requireAcks=<code>${esc(String(r.requirePipelineAcks))}</code>
+                OEM signature: ${oem}${r.oemKeyId ? ` <code>${esc(r.oemKeyId)}</code>` : ''}
+                · publisher-declared policy=<code>${esc(r.declaredPolicy)}</code>
                 · rkey=<code>${esc(r.rkey)}</code>
               </div>
               ${stages}
             </div>`
           })
-          .join('')
+          .join('') +
+        (status.releases.length > SHOWN
+          ? `<p class="muted">… and ${status.releases.length - SHOWN} older release(s).</p>`
+          : '')
+
+  const iot = status.iot
+  const iotCard = !iot.healthy
+    ? '<p class="bad">Control plane not reachable.</p>'
+    : `<p class="muted" style="margin:0 0 0.5rem">Job-signing key (devices pin this at the factory): <code>${esc(iot.controlPublicKey)}</code></p>
+      <table class="tight"><thead><tr><th>Serial</th><th>Product</th><th>State</th><th>Detail</th></tr></thead><tbody>
+      ${iot.pending
+        .map(
+          (j) => `<tr><td><code>${esc(j.serial)}</code></td><td>${esc(j.product)}</td>
+          <td><span class="warn">waiting for admin approval</span></td>
+          <td class="muted">${esc(j.mnemonic)} · <code>ofw-util approve ${esc(j.id)}</code></td></tr>`,
+        )
+        .join('')}
+      ${iot.devices
+        .map(
+          (d) => `<tr><td><code>${esc(d.serial)}</code></td><td>${esc(d.product)}</td>
+          <td><span class="ok">${esc(d.status)}</span></td>
+          <td class="muted">fingerprint ${esc(d.fingerprint)}…</td></tr>`,
+        )
+        .join('')}
+      ${
+        iot.pending.length + iot.devices.length === 0
+          ? '<tr><td colspan="4" class="muted">No devices yet — run <code>./scripts/iot-demo.sh</code>.</td></tr>'
+          : ''
+      }
+      </tbody></table>
+      ${
+        iot.jobs.length
+          ? `<table class="tight"><thead><tr><th>Signed job</th><th>Kind</th><th>Device</th><th>Status</th></tr></thead><tbody>
+        ${iot.jobs
+          .slice(0, 6)
+          .map(
+            (j) => `<tr><td><code>${esc(j.id)}</code></td><td>${esc(j.kind)}</td>
+            <td class="muted">${esc(j.fingerprint)}…</td>
+            <td>${j.status === 'acked_ok' ? '<span class="ok">applied by device</span>' : `<span class="warn">${esc(j.status)}</span>`}</td></tr>`,
+          )
+          .join('')}
+        </tbody></table>`
+          : ''
+      }`
 
   const awaitingNote =
     status.counts.awaitingPipeline > 0
-      ? `<p class="warn-box"><strong>${status.counts.awaitingPipeline}</strong> release(s) waiting on pipeline-runner acks before Sidekar installs.</p>`
+      ? `<p class="warn-box"><strong>${status.counts.awaitingPipeline}</strong> release(s) waiting for the CI attester and the publisher's promotion; no device is offered them yet.</p>`
       : `<p class="muted">No releases currently in <code>awaiting-pipeline</code>.</p>`
 
   const logRows =
@@ -502,6 +744,12 @@ function page(status) {
       border: 1px solid var(--line); border-radius: 0.65rem; padding: 0.75rem;
       margin: 0.6rem 0; background: #0b1220;
     }
+    .rel-bad { border-color: rgba(248,113,113,0.55); background: rgba(248,113,113,0.06); }
+    .pill {
+      display: inline-block; padding: 0.05rem 0.5rem; border-radius: 999px; font-size: 0.72rem;
+      border: 1px solid rgba(96,165,250,0.45); color: var(--accent); margin-left: 0.25rem;
+    }
+    button.danger { background: #7f1d1d; color: #fecaca; border-color: #f87171; }
     .rel-head { display: flex; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; align-items: baseline; }
     a { color: var(--accent); }
     footer { color: var(--muted); font-size: 0.85rem; margin: 2rem 0 1rem; }
@@ -697,8 +945,9 @@ function page(status) {
   <header>
     <h1>Guided walkthrough</h1>
     <p class="lead">
-      Trigger a real signed update from this page. Sidekar is the <strong>installer container</strong>;
-      the pipeline runner is a <strong>separate CI container</strong> that posts test acks.
+      Publish a real release from this page and watch each party check it. The <strong>publisher</strong> signs
+      with an OEM key, an <strong>independent CI account</strong> attests build + test, and <strong>Sidekar</strong>
+      installs only what passes both checks — then try the attack button.
     </p>
     <span class="badge" id="clock">${esc(status.at)}</span>
   </header>
@@ -712,20 +961,21 @@ function page(status) {
           value="Hello from walkthrough ${new Date().toISOString().slice(11, 19)}" />
       </label>
       <div class="btn-row">
-        <button type="button" class="primary" id="btn-fast" onclick="triggerPublish(false)">
-          Publish now (skip CI)
+        <button type="button" class="primary" id="btn-signed" onclick="triggerPublish('signed')">
+          Publish signed release (OEM key + CI)
         </button>
-        <button type="button" class="secondary" id="btn-ci" onclick="triggerPublish(true)">
-          Publish with CI gate
+        <button type="button" class="danger" id="btn-attack" onclick="triggerPublish('attack')">
+          Simulate attack: stolen password, unsigned
         </button>
         <button type="button" class="secondary" id="btn-refresh" onclick="location.reload()">
           Refresh status
         </button>
       </div>
       <p class="muted" style="margin:0.5rem 0 0;font-size:0.85rem">
-        <strong>Skip CI:</strong> release becomes <code>ready</code> immediately → Sidekar installs.<br/>
-        <strong>With CI:</strong> gate is <code>awaiting-pipeline</code> until the pipeline-runner acks build+test and updates the channel pointer → then Sidekar installs.
-        A little 🚗 drives start → finish through each stage (including CI/CD).
+        <strong>Signed release:</strong> Ed25519 OEM signature, gate <code>awaiting-pipeline</code> until the CI account
+        acks build + test, the publisher promotes, Sidekar verifies and installs.<br/>
+        <strong>Attack:</strong> someone with the publisher's PDS password pushes an unsigned release straight to the
+        channel. The PDS accepts it. Sidekar must not install it.
       </p>
       <div id="flash"></div>
     </div>
@@ -763,13 +1013,13 @@ function page(status) {
     <h2>Roles</h2>
     <div class="card">
       <div class="flow">
-        <div class="node"><strong>1. You (this page)</strong>trigger publish</div>
+        <div class="node"><strong>1. Publisher</strong>OEM-signs, publishes</div>
         <div class="arrow">→</div>
-        <div class="node"><strong>2. PDS</strong>signed release</div>
+        <div class="node"><strong>2. PDS</strong>immutable release record + blobs</div>
         <div class="arrow">→</div>
-        <div class="node"><strong>3. Runner container</strong>CI acks (optional)</div>
+        <div class="node"><strong>3. CI account</strong>attests build + test</div>
         <div class="arrow">→</div>
-        <div class="node"><strong>4. Sidekar container</strong>install</div>
+        <div class="node"><strong>4. Sidekar</strong>verifies key, acks, hashes; installs</div>
         <div class="arrow">→</div>
         <div class="node"><strong>5. demo-site</strong>front page</div>
       </div>
@@ -779,8 +1029,8 @@ function page(status) {
     <div class="stats">
       <div class="stat"><div class="n">${status.counts.releases}</div><div class="l">Releases</div></div>
       <div class="stat"><div class="n">${status.counts.awaitingPipeline}</div><div class="l">Awaiting CI</div></div>
-      <div class="stat"><div class="n">${status.counts.ready}</div><div class="l">Ready</div></div>
-      <div class="stat"><div class="n">${status.counts.pipelineAcks}</div><div class="l">Pipeline acks</div></div>
+      <div class="stat"><div class="n">${status.counts.installable}</div><div class="l">Passed all checks</div></div>
+      <div class="stat"><div class="n" style="color:${status.counts.refused ? 'var(--bad)' : 'var(--accent)'}">${status.counts.refused}</div><div class="l">Refused by Sidekar</div></div>
     </div>
     <div class="card">${awaitingNote}</div>
 
@@ -791,7 +1041,9 @@ function page(status) {
         <tbody>${rows}</tbody>
       </table>
       <p class="muted" style="margin:0.75rem 0 0;font-size:0.85rem">
-        Publisher DID: <code>${esc(status.authorDid || 'waiting…')}</code>
+        Publisher DID: <code>${esc(status.authorDid || 'waiting…')}</code><br/>
+        CI attester DID (Sidekar requires its acks): <code>${esc(status.attesterDid || 'waiting…')}</code><br/>
+        OEM public key pinned by Sidekar: <code>${esc(status.trustedOemKeys.join(', ') || 'none')}</code>
       </p>
     </div>
 
@@ -801,8 +1053,11 @@ function page(status) {
       <p style="margin:0.75rem 0 0"><a href="http://localhost:8080" target="_blank" rel="noopener">Open app →</a></p>
     </div>
 
-    <h2>Releases + CI results</h2>
+    <h2>Releases — what Sidekar will do with each</h2>
     <div class="card" id="releases">${releaseCards}</div>
+
+    <h2>IoT control plane — devices and signed jobs</h2>
+    <div class="card" id="iot">${iotCard}</div>
 
     <h2>Actions from this page</h2>
     <div class="card">${logRows}</div>
@@ -815,9 +1070,9 @@ function page(status) {
   <script>
     let busy = false
     const STAGES = [
-      { id: 'publish', label: 'Publish', detail: 'Sign & post release to PDS' },
-      { id: 'cicd', label: 'CI/CD', detail: 'Pipeline runner acks build + test' },
-      { id: 'install', label: 'Install', detail: 'Sidekar applies ready release' },
+      { id: 'publish', label: 'Publish', detail: 'Sign with the OEM key, post release to the PDS' },
+      { id: 'cicd', label: 'CI/CD', detail: 'Independent CI account attests build + test; publisher promotes' },
+      { id: 'install', label: 'Install', detail: 'Sidekar verifies OEM key, CI acks, hashes; then applies' },
       { id: 'live', label: 'Live', detail: 'Demo front page shows new message' },
     ]
 
@@ -859,12 +1114,12 @@ function page(status) {
       }).join('')
     }
 
-    function openGrowthModal(requirePipeline) {
+    function openGrowthModal(mode) {
       const backdrop = document.getElementById('growth-modal')
       document.getElementById('growth-title').textContent = 'Update in transit…'
-      document.getElementById('growth-sub').textContent = requirePipeline
+      document.getElementById('growth-sub').textContent = mode === 'signed'
         ? '🚗 drives Publish → CI/CD → Install → Live. Badge turns green at each checkpoint.'
-        : '🚗 still hits CI/CD as a quick skip, then Install → Live.'
+        : 'An attacker with the stolen publisher password pushes an unsigned release. Watch where it stops.'
       document.getElementById('modal-close').disabled = true
       setCar('loading', 'loading', 0)
       renderStages(Object.fromEntries(STAGES.map((s) => [s.id, { status: 'pending', note: s.detail }])))
@@ -896,13 +1151,16 @@ function page(status) {
       return res.json()
     }
 
-    async function triggerPublish(requirePipeline) {
+    async function triggerPublish(mode) {
+      const attack = mode === 'attack'
       if (busy) return
       busy = true
       const flash = document.getElementById('flash')
-      const msg = document.getElementById('msg').value.trim() ||
-        ('Hello from walkthrough ' + new Date().toISOString().slice(11, 19))
-      const btns = [document.getElementById('btn-fast'), document.getElementById('btn-ci')]
+      const msg = attack
+        ? 'PWNED at ' + new Date().toISOString().slice(11, 19) + ' (unsigned, stolen password)'
+        : (document.getElementById('msg').value.trim() ||
+          ('Hello from walkthrough ' + new Date().toISOString().slice(11, 19)))
+      const btns = [document.getElementById('btn-signed'), document.getElementById('btn-attack')]
       btns.forEach((b) => { b.disabled = true })
       flash.className = 'show'
       flash.textContent = 'Starting the car…'
@@ -920,7 +1178,7 @@ function page(status) {
         const idx = STAGES.findIndex((s) => s.id === id)
         // park car at stage: midway while active, fully at checkpoint when done
         let progress = doneCount / n
-        if (status === 'active' && idx >= 0) {
+        if ((status === 'active' || status === 'failed') && idx >= 0) {
           progress = (idx + 0.45) / n
         } else if ((status === 'done' || status === 'skipped') && idx >= 0) {
           progress = (idx + 1) / n
@@ -932,15 +1190,15 @@ function page(status) {
         else if (status === 'failed') setCar('err', 'fail', progress)
       }
 
-      openGrowthModal(requirePipeline)
+      openGrowthModal(mode)
 
       try {
         // —— Stage 1: Publish ——
-        mark('publish', 'active', 'Signing release on PDS…')
+        mark('publish', 'active', attack ? 'Attacker posts unsigned release to the PDS…' : 'Signing with the OEM key, posting to the PDS…')
         const res = await fetch('/api/actions/publish', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ message: msg, requirePipeline }),
+          body: JSON.stringify({ message: msg, mode }),
         })
         const data = await res.json()
         if (!res.ok) throw new Error(data.error || res.statusText)
@@ -948,26 +1206,57 @@ function page(status) {
         await sleep(280)
 
         // —— Stage 2: CI/CD ——
-        if (requirePipeline) {
-          mark('cicd', 'active', 'Waiting for pipeline-runner acks…')
+        if (!attack) {
+          mark('cicd', 'active', 'Waiting for the CI account to attest…')
           await pollUntil(async () => {
             const st = await fetchStatus()
             const rel = (st.releases || []).find((r) => r.version === data.version)
             if (!rel) return false
             if (rel.status === 'failed') throw new Error('Pipeline marked release failed')
             if (rel.status === 'ready') {
-              mark('cicd', 'done', 'build + test passed')
+              mark('cicd', 'done', 'build + test attested by the CI account; publisher promoted')
               return true
             }
             mark('cicd', 'active', 'status=' + rel.status + ' — waiting…')
             return false
           }, { timeoutMs: 120000, intervalMs: 400 })
         } else {
-          mark('cicd', 'active', 'Pipeline not required…')
-          await sleep(280)
-          mark('cicd', 'skipped', 'skipped (no CI gate)')
+          mark('cicd', 'active', 'Attacker skips CI…')
+          await sleep(400)
+          mark('cicd', 'skipped', 'bypassed — the PDS accepted it, gate=ready, channel moved')
         }
         await sleep(200)
+
+        if (attack) {
+          // Give Sidekar several poll cycles to (wrongly) install it.
+          mark('install', 'active', 'Channel points at the attacker release — will Sidekar install it?')
+          const t0 = Date.now()
+          let verdict = null
+          while (Date.now() - t0 < 6000) {
+            const st = await fetchStatus()
+            if (st.services?.demoSite?.message === msg) {
+              throw new Error('FAILED OPEN: the attacker payload is live')
+            }
+            const rel = (st.releases || []).find((r) => r.version === data.version)
+            if (rel) verdict = rel.verdict
+            await sleep(500)
+          }
+          const why = verdict && verdict.reasons.length ? verdict.reasons.join('; ') : 'policy not satisfied'
+          mark('install', 'failed', 'Sidekar REFUSED: ' + why)
+          states.live = { status: 'skipped', note: 'front page unchanged — attacker payload never ran' }
+          renderStages(states)
+          setCar('err', 'blocked')
+          document.getElementById('growth-title').textContent = 'Blocked — failed closed 🛡'
+          document.getElementById('growth-sub').textContent =
+            'A stolen password was not enough: no OEM signature, no CI attestation. Publish a signed release to move on.'
+          document.getElementById('modal-close').disabled = false
+          flash.className = 'show ok'
+          flash.innerHTML = '<strong>Attack blocked.</strong> v' + (data.version || '') +
+            ' is on the PDS; Sidekar refused it (' + why + ').'
+          busy = false
+          btns.forEach((b) => { b.disabled = false })
+          return
+        }
 
         // —— Stage 3: Install (Sidekar) ——
         mark('install', 'active', 'Sidekar installing ready release…')
@@ -1068,8 +1357,8 @@ const server = http.createServer(async (req, res) => {
       const body = raw ? JSON.parse(raw) : {}
       try {
         const result = await doPublish({
-          message: body.message,
-          requirePipeline: Boolean(body.requirePipeline),
+          message: typeof body.message === 'string' ? body.message.slice(0, 200) : undefined,
+          mode: body.mode === 'attack' ? 'attack' : 'signed',
         })
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(result))
@@ -1096,4 +1385,5 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`walkthrough listening on :${PORT}`)
   console.log(`publish actions enabled → ${PDS_URL} as ${OFW_IDENTIFIER}`)
+  console.log(`OEM key loaded: ${OEM_PUBLIC_KEY || 'NO'}; trusted by Sidekar: ${TRUSTED_OEM_KEYS.join(',') || 'none'}`)
 })

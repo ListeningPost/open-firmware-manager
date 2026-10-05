@@ -1,6 +1,6 @@
 # `@open-firmware/sidekar`
 
-Production **server-side** agent.
+**Server-side** agent (early prototype).
 
 - Polls an AT Protocol **PDS** for ready releases
 - Phase A/B via `@open-firmware/client` + `@open-firmware/core`

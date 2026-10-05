@@ -1,15 +1,22 @@
 /**
- * Generic pipeline / CI runner (NOT Sidekar).
+ * Demo CI attester (NOT Sidekar, NOT the publisher).
  *
- * Watches the PDS for gates in awaiting-pipeline, simulates build+test,
- * and posts pipeline-ack records. Any external CI can do the same with ofw.
+ * Watches the publisher's repo for gates in `awaiting-pipeline`, "runs" each
+ * required stage, and records the result as a pipelineAck in ITS OWN repo,
+ * logged in as an independent account (ci-attester.pds.test). Each ack names the
+ * release URI and CID, so it can never vouch for different bytes.
  *
- * Modes:
- *   ONCE=1          — process pending once and exit
- *   AUTO_ACK=1      — default: auto-pass build+test (demo)
- *   AUTO_ACK=0      — only log; wait for external ofw pipeline-ack
+ * It holds no publisher credentials, so it cannot change the gate or the
+ * channel: promotion stays a publisher action (`ofw pipeline-promote
+ * --attester-did <this DID>`), and Sidekar re-checks these acks itself.
+ *
+ * Any real CI does the same with `ofw pipeline-ack --author-did <publisher>`.
+ *
+ * Env:
+ *   ONCE=1            process pending gates once and exit
+ *   AUTO_ACK=0        only log; leave the acks to an external CI
+ *   STAGE_DELAY_MS    pretend-work per stage (default 1200)
  */
-import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 
@@ -19,24 +26,22 @@ const PDS_URL = (process.env.PDS_URL || process.env.OFW_PDS || 'http://pds:2583'
 )
 const AUTHOR_DID_FILE = process.env.AUTHOR_DID_FILE || '/config/author.did'
 const POLL_MS = Number(process.env.POLL_MS || 4000)
+const STAGE_DELAY_MS = Number(process.env.STAGE_DELAY_MS || 1200)
 const ONCE = process.env.ONCE === '1'
 const AUTO_ACK = process.env.AUTO_ACK !== '0'
-const STAGES = (process.env.STAGES || 'build,test')
+const DEFAULT_STAGES = (process.env.STAGES || 'build,test')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean)
-const OFW_BIN = process.env.OFW_BIN || 'ofw'
-const IDENTIFIER = process.env.OFW_IDENTIFIER || 'publisher.pds.test'
-const PASSWORD = process.env.OFW_PASSWORD || 'publisher-pass-change-me'
-const HOST_PDS = process.env.HOST_PDS_URL || PDS_URL
+const CI_IDENTIFIER = process.env.OFW_CI_IDENTIFIER || 'ci-attester.pds.test'
+const CI_PASSWORD = process.env.OFW_CI_PASSWORD || 'ci-pass-change-me'
 
 const COL_RELEASE = 'app.openfirmware.firmware.release'
 const COL_ACK = 'app.openfirmware.firmware.pipelineAck'
 const COL_GATE = 'app.openfirmware.firmware.gate'
-const COL_CHANNEL = 'app.openfirmware.firmware.channel'
 
 function log(...a) {
-  console.log(new Date().toISOString(), '[pipeline-runner]', ...a)
+  console.log(new Date().toISOString(), '[ci-runner]', ...a)
 }
 
 function readAuthorDid() {
@@ -44,7 +49,7 @@ function readAuthorDid() {
     return process.env.AUTHOR_DID || process.env.OFW_AUTHOR_DID
   }
   try {
-    return fs.readFileSync(AUTHOR_DID_FILE, 'utf8').trim()
+    return fs.readFileSync(AUTHOR_DID_FILE, 'utf8').trim() || null
   } catch {
     return null
   }
@@ -72,234 +77,150 @@ async function listRecords(repo, collection) {
   return out
 }
 
-function rkeyFromUri(uri) {
-  return uri.split('/').pop()
-}
+/** CI account session; re-created when the PDS rejects the token. */
+let session = null
 
-function ofwAck(rkey, stage, result) {
-  // Prefer host ofw when mounted; otherwise use HTTP session via a tiny inline approach
-  // We shell to ofw if available, else use createSession + createRecord via fetch.
-  const which = spawnSync('which', [OFW_BIN], { encoding: 'utf8' })
-  if (which.status === 0) {
-    const args = [
-      'pipeline-ack',
-      '--pds',
-      HOST_PDS,
-      '--identifier',
-      IDENTIFIER,
-      '--password',
-      PASSWORD,
-      '--rkey',
-      rkey,
-      '--stage',
-      stage,
-      '--result',
-      result,
-      '--summary',
-      `pipeline-runner auto ${stage}`,
-    ]
-    const r = spawnSync(OFW_BIN, args, { encoding: 'utf8' })
-    if (r.status !== 0) {
-      throw new Error(r.stderr || r.stdout || `ofw failed ${r.status}`)
-    }
-    return r.stdout
-  }
-  return postAckViaXrpc(rkey, stage, result)
-}
-
-async function postAckViaXrpc(rkey, stage, result) {
-  const sessRes = await fetch(`${PDS_URL}/xrpc/com.atproto.server.createSession`, {
+async function login() {
+  const res = await fetch(`${PDS_URL}/xrpc/com.atproto.server.createSession`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ identifier: IDENTIFIER, password: PASSWORD }),
+    body: JSON.stringify({ identifier: CI_IDENTIFIER, password: CI_PASSWORD }),
   })
-  if (!sessRes.ok) throw new Error(`createSession ${await sessRes.text()}`)
-  const sess = await sessRes.json()
+  if (!res.ok) throw new Error(`CI login as ${CI_IDENTIFIER} failed: ${await res.text()}`)
+  session = await res.json()
+  log('logged in as', CI_IDENTIFIER, session.did)
+  return session
+}
 
-  const getRes = await fetch(
-    `${PDS_URL}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(sess.did)}&collection=${encodeURIComponent(COL_RELEASE)}&rkey=${encodeURIComponent(rkey)}`,
-  )
-  if (!getRes.ok) throw new Error(`getRecord ${await getRes.text()}`)
-  const rec = await getRes.json()
-
-  const ack = {
-    $type: COL_ACK,
-    release: { uri: rec.uri, cid: rec.cid },
-    stage,
-    result,
-    createdAt: new Date().toISOString(),
-    summary: `pipeline-runner auto ${stage}`,
-    actor: sess.did,
-  }
-  const createRes = await fetch(`${PDS_URL}/xrpc/com.atproto.repo.createRecord`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${sess.accessJwt}`,
-    },
-    body: JSON.stringify({
-      repo: sess.did,
-      collection: COL_ACK,
-      record: ack,
-    }),
-  })
-  if (!createRes.ok) throw new Error(`createRecord ack ${await createRes.text()}`)
-
-  // promote if complete
-  const acks = await listRecords(sess.did, COL_ACK, 100)
-  const required = rec.value.requiredPipelineStages?.length
-    ? rec.value.requiredPipelineStages
-    : STAGES
-  const latest = new Map()
-  for (const a of acks
-    .filter((x) => x.value?.release?.uri === rec.uri)
-    .sort((a, b) =>
-      String(a.value.createdAt) < String(b.value.createdAt) ? -1 : 1,
-    )) {
-    latest.set(String(a.value.stage), String(a.value.result))
-  }
-  // include the one we just posted
-  latest.set(stage, result)
-
-  let allOk = true
-  for (const s of required) {
-    const r = latest.get(s)
-    if (r !== 'passed' && r !== 'skipped') allOk = false
-  }
-  async function putSidecar(collection, sidecarRkey, record) {
-    const existing = await fetch(
-      `${PDS_URL}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(sess.did)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(sidecarRkey)}`,
-    )
-    const prev = existing.ok ? await existing.json() : null
-    const body = {
-      repo: sess.did,
-      collection,
-      rkey: sidecarRkey,
-      record,
-    }
-    if (prev?.cid) body.swapRecord = prev.cid
-    const method = prev ? 'putRecord' : 'createRecord'
-    if (!prev) body.rkey = sidecarRkey
-    const r = await fetch(`${PDS_URL}/xrpc/com.atproto.repo.${method}`, {
+async function createAck(record) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const s = session || (await login())
+    const res = await fetch(`${PDS_URL}/xrpc/com.atproto.repo.createRecord`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${sess.accessJwt}`,
+        authorization: `Bearer ${s.accessJwt}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ repo: s.did, collection: COL_ACK, record }),
     })
-    if (!r.ok) throw new Error(`${method} ${collection} ${await r.text()}`)
+    if (res.ok) return res.json()
+    const text = await res.text()
+    if (attempt === 0 && (res.status === 401 || /ExpiredToken|InvalidToken/.test(text))) {
+      session = null
+      continue
+    }
+    throw new Error(`createRecord pipelineAck ${res.status} ${text}`)
   }
-
-  if (result === 'failed') {
-    await putSidecar(COL_GATE, rkey, {
-      $type: COL_GATE,
-      release: { uri: rec.uri, cid: rec.cid },
-      state: 'failed',
-      updatedAt: new Date().toISOString(),
-    })
-    return 'failed'
-  }
-  if (allOk) {
-    await putSidecar(COL_GATE, rkey, {
-      $type: COL_GATE,
-      release: { uri: rec.uri, cid: rec.cid },
-      state: 'ready',
-      updatedAt: new Date().toISOString(),
-    })
-    const product = rec.value.product
-    const channel = rec.value.channel || 'stable'
-    const chRkey = `${product}-${channel}`.replace(/[^A-Za-z0-9._~-]+/g, '-')
-    await putSidecar(COL_CHANNEL, chRkey, {
-      $type: COL_CHANNEL,
-      product,
-      channel,
-      release: { uri: rec.uri, cid: rec.cid },
-      version: rec.value.version,
-      updatedAt: new Date().toISOString(),
-    })
-    return 'promoted'
-  }
-  return 'acked'
+  throw new Error('createRecord pipelineAck: could not authenticate')
 }
+
+/** Gates already reported as waiting, so AUTO_ACK=0 does not repeat itself. */
+const reported = new Set()
+let idleLogged = false
 
 async function processOnce() {
   const authorDid = readAuthorDid()
   if (!authorDid) {
-    log('waiting for AUTHOR_DID')
+    log('waiting for the publisher DID')
     return 0
   }
 
   const gates = await listRecords(authorDid, COL_GATE)
   const awaiting = gates.filter((g) => g.value?.state === 'awaiting-pipeline')
   if (!awaiting.length) {
-    log('no awaiting-pipeline gates')
+    if (!idleLogged) log('idle: no release is awaiting the pipeline')
+    idleLogged = true
     return 0
   }
+  idleLogged = false
+
+  const s = session || (await login())
+  const myAcks = await listRecords(s.did, COL_ACK)
 
   let n = 0
   for (const gate of awaiting) {
-    const rkey = rkeyFromUri(gate.uri)
+    const rkey = gate.uri.split('/').pop()
     const relRes = await fetch(
       `${PDS_URL}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(authorDid)}&collection=${encodeURIComponent(COL_RELEASE)}&rkey=${encodeURIComponent(rkey)}`,
     )
     if (!relRes.ok) continue
     const rel = await relRes.json()
+    // Attest the record the gate was created for, and only if it is still that record.
+    if (gate.value?.release?.uri !== rel.uri || gate.value?.release?.cid !== rel.cid) {
+      log('skip', rkey, '- gate does not reference the current release record')
+      continue
+    }
     const required = rel.value.requiredPipelineStages?.length
       ? rel.value.requiredPipelineStages
-      : STAGES
-    const acks = await listRecords(authorDid, COL_ACK)
-    const mine = acks.filter((a) => a.value?.release?.uri === rel.uri)
-    const have = new Map()
-    for (const a of mine) {
-      have.set(String(a.value.stage), String(a.value.result))
-    }
-
-    log('found', rkey, 'needs', required.join(','))
+      : DEFAULT_STAGES
+    const have = new Set(
+      myAcks
+        .filter((a) => a.value?.release?.uri === rel.uri && a.value?.release?.cid === rel.cid)
+        .map((a) => String(a.value.stage)),
+    )
+    const todo = required.filter((stage) => !have.has(stage))
+    if (!todo.length) continue // attested; waiting for the publisher to promote
 
     if (!AUTO_ACK) {
-      log('AUTO_ACK=0 — not posting; use external CI / ofw pipeline-ack')
+      if (!reported.has(rel.cid)) {
+        log(rkey, 'needs', todo.join(','), '- AUTO_ACK=0, leaving it to external CI')
+        reported.add(rel.cid)
+      }
       continue
     }
 
-    for (const stage of required) {
-      const cur = have.get(stage)
-      if (cur === 'passed' || cur === 'skipped') continue
-      log('simulating stage', stage, 'for', rkey)
-      // pretend to "run" the stage
-      await new Promise((r) => setTimeout(r, 400))
-      const out = await ofwAck(rkey, stage, 'passed')
-      log('ack', stage, typeof out === 'string' ? out.trim().split('\n').pop() : out)
-      have.set(stage, 'passed')
+    log('picked up', rkey, `v${rel.value.version}`, '- stages:', todo.join(', '))
+    for (const stage of todo) {
+      log(`  running ${stage} ...`)
+      await new Promise((r) => setTimeout(r, STAGE_DELAY_MS))
+      await createAck({
+        $type: COL_ACK,
+        release: { uri: rel.uri, cid: rel.cid },
+        stage,
+        result: 'passed',
+        createdAt: new Date().toISOString(),
+        summary: `demo CI: ${stage} passed`,
+        actor: s.did,
+      })
+      log(`  ${stage} passed -> ack written to the CI repo (${s.did})`)
       n++
     }
+    log('attested', rkey, '- the publisher can now promote it')
   }
   return n
 }
 
-const healthPort = Number(process.env.HEALTH_PORT || 9091)
-http
-  .createServer((_req, res) => {
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(
-      JSON.stringify({
-        ok: true,
-        role: 'pipeline-runner',
-        note: 'CI/validator container — NOT Sidekar (installer)',
-        autoAck: AUTO_ACK,
-      }),
-    )
-  })
-  .listen(healthPort, () => log('health on :' + healthPort))
+if (!ONCE) {
+  const healthPort = Number(process.env.HEALTH_PORT || 9091)
+  http
+    .createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          ok: true,
+          role: 'ci-attester',
+          identity: CI_IDENTIFIER,
+          did: session?.did ?? null,
+          note: 'independent CI account; writes acks only, cannot promote or install',
+          autoAck: AUTO_ACK,
+        }),
+      )
+    })
+    .listen(healthPort, () => log('health on :' + healthPort))
+}
 
 async function loop() {
-  log('starting', { PDS_URL, AUTO_ACK, ONCE, STAGES: STAGES.join(',') })
-  log('role: generic CI/validator runner container — NOT Sidekar')
+  log('starting', { PDS_URL, CI_IDENTIFIER, AUTO_ACK, ONCE, STAGES: DEFAULT_STAGES.join(',') })
+  let lastError = ''
   for (;;) {
     try {
       await processOnce()
+      lastError = ''
     } catch (e) {
-      log('error', e.message || e)
+      const msg = String(e?.message || e)
+      if (msg !== lastError) log('error', msg)
+      lastError = msg
+      if (ONCE) process.exit(1)
     }
     if (ONCE) {
       log('ONCE mode exit')

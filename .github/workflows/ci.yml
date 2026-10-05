@@ -70,9 +70,26 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: cli
+      # tests/ts_interop.rs cross-checks OEM signatures against the TypeScript
+      # implementation. It skips silently unless @open-firmware/core is built,
+      # so build it here and make the test mandatory.
+      # pnpm version comes from "packageManager" in package.json.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Build @open-firmware/core for the TypeScript interop test
+        working-directory: .
+        run: |
+          pnpm install --frozen-lockfile --filter "@open-firmware/core..."
+          pnpm --filter "@open-firmware/core..." --if-present run build
+          test -f packages/core/dist/sign/index.js
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+        env:
+          OFW_REQUIRE_TS_INTEROP: "1"
       - run: cargo build --release --locked
 
   docker:
@@ -98,6 +115,12 @@ jobs:
           - name: pipeline-runner
             context: examples/full-stack/services/pipeline-runner
             dockerfile: examples/full-stack/services/pipeline-runner/Dockerfile
+          - name: bootstrap
+            context: examples/full-stack/services/bootstrap
+            dockerfile: examples/full-stack/services/bootstrap/Dockerfile
+          - name: mock-plc
+            context: examples/full-stack/services/mock-plc
+            dockerfile: examples/full-stack/services/mock-plc/Dockerfile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

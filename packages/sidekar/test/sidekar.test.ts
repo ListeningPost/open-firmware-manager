@@ -337,6 +337,41 @@ describe('Sidekar.tick — refusals', () => {
     expect((await s.tick())?.version).toBe('1.0.0')
   })
 
+  it('logs why the pointed-at release is refused, once per reason', async () => {
+    const w = await world()
+    const s = w.sidekar({ attesterDids: [CI] })
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await s.tick()
+      await s.tick()
+      const refusals = spy.mock.calls.filter((c) => c.includes('REFUSED'))
+      expect(refusals).toHaveLength(1)
+      expect(refusals[0]!.join(' ')).toMatch(/1\.0\.0.*PIPELINE_INCOMPLETE/)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('runLoop names the release and the audit issue when Phase A fails, once', async () => {
+    const oem = generateOemKey()
+    const w = await world({}, { oem: generateOemKey() })
+    const s = w.sidekar({ trustedOemKeys: [oem.publicKey], pollIntervalMs: 1 })
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const ac = new AbortController()
+      const loop = s.runLoop(ac.signal)
+      await new Promise((r) => setTimeout(r, 60))
+      s.stop()
+      ac.abort()
+      await loop
+      const refusals = spy.mock.calls.filter((c) => c.includes('REFUSED'))
+      expect(refusals).toHaveLength(1)
+      expect(refusals[0]!.join(' ')).toMatch(/demo 1\.0\.0 .*OEM_SIG_INVALID/)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('refuses tampered bytes', async () => {
     const w = await world()
     const first = [...w.blobs.keys()][0]!

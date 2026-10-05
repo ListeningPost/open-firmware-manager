@@ -56,6 +56,21 @@ export interface ClientOptions {
   fetch?: typeof fetch
   /** Emergency only. Use OFW_CONSUMER_SKIP_PIPELINE, never OFW_SKIP_PIPELINE. */
   skipPipelineCheck?: boolean
+  /**
+   * Called when the channel pointer names a release this consumer will not
+   * install (gate not ready, or the pipeline policy is not satisfied), so an
+   * operator can tell "refusing" apart from "nothing new".
+   */
+  onNotInstallable?: (info: NotInstallableInfo) => void
+}
+
+export interface NotInstallableInfo {
+  uri: string
+  cid: string
+  product: string
+  version: string
+  reason: string
+  issues: Array<{ code: string; message: string }>
 }
 
 export interface ResolveLatestOptions {
@@ -110,6 +125,7 @@ export class OpenFirmwareClient {
   readonly maxImageBytes: number
   private readonly reader: AtpClient
   private readonly skipPipelineCheck: boolean
+  private readonly onNotInstallable?: (info: NotInstallableInfo) => void
 
   constructor(opts: ClientOptions) {
     this.pds = opts.pds
@@ -125,6 +141,7 @@ export class OpenFirmwareClient {
     this.maxImageBytes = opts.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES
     this.reader = publicClient(opts.pds, opts.fetch)
     this.skipPipelineCheck = opts.skipPipelineCheck ?? false
+    this.onNotInstallable = opts.onNotInstallable
   }
 
   private pipelineOptions(skipPipelineCheck?: boolean): PipelineAuditOptions {
@@ -235,7 +252,17 @@ export class OpenFirmwareClient {
       acks,
       this.pipelineOptions(opts.skipPipelineCheck),
     )
-    if (!gate.installable) return null
+    if (!gate.installable) {
+      this.onNotInstallable?.({
+        uri: loaded.uri,
+        cid: loaded.cid,
+        product: loaded.meta.product,
+        version: loaded.meta.version,
+        reason: gate.reason ?? 'not installable',
+        issues: gate.pipeline.issues.map((i) => ({ code: i.code, message: i.message })),
+      })
+      return null
+    }
     return loaded
   }
 

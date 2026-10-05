@@ -1,205 +1,172 @@
 # Guided walkthrough — Open Firmware full stack
 
-This walkthrough is the **main way to understand the project** by running the sample `docker compose` stack.
+Run the sample stack and watch a software update travel from a publisher to a running app, with each party checking it on the way. No AT Protocol knowledge needed.
 
-You do **not** need to know AT Protocol jargon to follow along.
+For a timed presenter script, see [`docs/demo-runbook.md`](../../docs/demo-runbook.md).
 
----
+## The story
 
-## What you will see
+1. A **publisher** signs an update with an OEM key and publishes it to a **PDS** (an AT Protocol server; here it is the distribution center).
+2. An **independent CI account** builds and tests it, and records "build passed, test passed" for that exact release in its own repository.
+3. The publisher **promotes** the release. Only now does the channel point at it.
+4. **Sidekar**, the agent on the target machine, trusts nobody's word: it checks the OEM signature against a key it has pinned, checks the CI account's acks, checks every hash, and only then applies the update.
+5. The **demo site** shows the new payload.
 
-| Open in browser | What it is |
-|-----------------|------------|
-| **http://localhost:8099** | **Guided walkthrough** (start here) |
-| **http://localhost:8080** | Example app that gets updated |
-| **http://localhost:2583/xrpc/_health** | PDS health (distribution center) |
+The payload here is a line of text. The same chain carries firmware images, packages and container tarballs.
 
----
-
-## Story in plain English
-
-1. **You publish** a signed software update (here: a short text “package”).
-2. It is stored on a **PDS** — the official AT Protocol server for this stack.
-3. **Sidekar** (an agent on the “server”) checks for new updates.
-4. It **verifies** the update is complete and correct.
-5. It **applies** the update to the example app.
-6. The **front page** shows the new message.
-
-That is the same pattern production uses for firmware, packages, and containers.
-
----
-
-## Start the stack
-
-From the repo:
+## Start
 
 ```bash
+# once, from the repository root
+cargo build --release --locked --manifest-path cli/Cargo.toml
+pnpm install --frozen-lockfile && pnpm -r build     # for the IoT part
+
 cd examples/full-stack
-
-# One-time secrets for the local PDS
-./scripts/gen-pds-secrets.sh
-
-# Build and start everything
-docker compose up --build -d
+./scripts/demo-up.sh
 ```
 
-What starts:
+`demo-up.sh` generates local secrets and an OEM key, builds the images, starts everything and waits for the health checks. It prints the two account DIDs and the OEM public key.
 
-| Service | Role (simple) |
-|---------|----------------|
-| **pds** | The signed software storehouse |
-| **bootstrap** | Creates an example publisher account once |
-| **sidekar** | Watches the storehouse and updates the app |
-| **demo-site** | Fake “your product” with a front page |
-| **walkthrough** | This tour, with live status |
+| Open | What it is |
+|------|------------|
+| <http://localhost:8099> | Walkthrough page: live status, what Sidekar will do with each release |
+| <http://localhost:8080> | The app being updated |
 
-Open: **http://localhost:8099**
-
----
-
-## Step 1 — Open the walkthrough
-
-Open **http://localhost:8099**
-
-You will see live service status (all Docker containers) and **buttons to trigger updates**.
-
----
-
-## Step 2 — Trigger an update from the page
-
-On the walkthrough page:
-
-1. Type a message (or keep the default).
-2. Click **Publish now (skip CI)** — release becomes `ready` immediately.
-3. Wait a few seconds — Sidekar installs and the front page message updates.
-4. Or click **Publish with CI gate** — status is `awaiting-pipeline` until the **pipeline-runner container** acks build+test, then Sidekar installs.
-
-You can also still use the CLI:
+## Step 1 — a good release
 
 ```bash
-./scripts/publish-to-pds.sh "Hello from the CLI"
-./scripts/publish-with-pipeline.sh "Hello after CI"
+./scripts/demo-happy-path.sh "Hello from a signed release"
 ```
 
----
+The script prints each command it runs. In order:
 
-## Step 3 — Publish again
+| Step | Who | Command | Result |
+|------|-----|---------|--------|
+| 1 | Publisher | `ofw publish … --require-pipeline --stages build,test --oem-key .local/oem.pem` | Release created, gate `awaiting-pipeline`, channel unchanged |
+| 2 | CI account | (the `pipeline-runner` container) | Two ack records in the CI account's repository, naming the release CID |
+| 3 | Publisher | `ofw pipeline-promote --rkey … --attester-did <CI DID>` | Gate `ready`, channel points at the release |
+| 4 | Sidekar | — | `applying package 1.0.1 …`, `applied 1.0.1`; the site changes |
+| 5 | Anyone | `ofw audit … --probe-blobs --trusted-oem-key <key>` | `OK — metadata and every blob verified` |
+
+Run it again with another message: each run publishes the next version.
+
+To take the steps by hand:
 
 ```bash
-./scripts/publish-to-pds.sh "Second update — Sidekar will pick this up"
+./scripts/publish-with-pipeline.sh "Hello after tests"   # step 1 only
+./scripts/promote.sh                                     # step 3; fails until CI has acked
 ```
 
-Sidekar only installs **newer** ready versions. Each publish should show up on the front page within a few seconds.
+Or use the **Publish signed release** button on <http://localhost:8099>. The page signs with the same OEM key and promotes when the CI acks arrive.
 
----
+## Step 2 — try to break it
 
-## Step 4 — CI / pipeline (runner ≠ Sidekar)
-
-**Sidekar only installs.** A separate **pipeline runner** (or GitHub Actions) posts build/test results.
-
-| Role | Job |
-|------|-----|
-| Publisher | `ofw publish` |
-| **Runner / CI** | run tests → `pipeline-ack` |
-| Sidekar | install when `ready` |
-
-### Fast path (no CI)
+Each script plays an attacker who has stolen the publisher's PDS password. That is enough to write anything into the publisher's repository. It should not be enough to change what runs.
 
 ```bash
-./scripts/publish-to-pds.sh "Hello (skip CI)"
+./scripts/attack-unsigned.sh     # no OEM key, CI skipped
+./scripts/attack-wrong-key.sh    # signs with a key of their own, goes through CI
+./scripts/demo-happy-path.sh "A good release again"
+./scripts/attack-overwrite.sh    # replace the bytes of the live release
 ```
 
-### CI path (visible on walkthrough :8099)
+| Attack | The PDS | Sidekar |
+|--------|---------|---------|
+| Unsigned, CI skipped | Accepts; gate `ready`, channel moved | `REFUSED … PIPELINE_INCOMPLETE` — no ack from the CI account. `ofw audit` adds `OEM_SIG_MISSING` |
+| Signed with the attacker's key, passed CI | Accepts; promoted on real CI acks | `REFUSED … OEM_SIG_INVALID: oem public key is not in trustedOemKeys` |
+| Publish the same version again | `ofw` refuses: `already exists … releases are immutable` | — |
+| Rewrite the release record through the raw API | Accepts; the record gets a new content ID | Refuses: the channel pins the old content ID. `ofw audit` reports `GATE_MISMATCH` and `OEM_SIG_INVALID` |
+
+After each script the demo site still shows the last good payload. The walkthrough page marks the attacker's releases **REFUSED** with the reason. The **Simulate attack** button on that page runs the first attack.
+
+After an attack the channel points at a release Sidekar refuses, so updates stall until the publisher publishes the next good release — run `demo-happy-path.sh` again. An attacker with the password can stall updates; they cannot install anything.
+
+## Step 3 — the IoT control plane
+
+Releases are public. Device management is not: joining a fleet, credentials and job delivery go through the private control plane on port 8787.
 
 ```bash
-./scripts/publish-with-pipeline.sh "Hello after tests"
-# status = awaiting-pipeline — watch counters/stages on http://localhost:8099
-# compose service pipeline-runner auto-acks build+test (demo)
-# or: ./scripts/pipeline-runner-once.sh
-# then Sidekar installs when ready
+./scripts/iot-demo.sh
 ```
 
-Walkthrough shows per-release: status, required stages, each ack result, and gate summary.
-
-## Step 5 — Relate this to real life
-
-| In this example | In production |
-|-----------------|---------------|
-| Text package as the “artifact” | Firmware image, container tar, deploy bundle |
-| Local PDS on port 2583 | Your real PDS URL |
-| `publisher.pds.test` | Your company handle + app password |
-| demo-site front page | Your cameras / servers / apps |
-| `./scripts/publish-to-pds.sh` | `ofw publish` in CI or on your laptop |
-
-GitHub Actions would only **build and publish**.  
-Sidekar on each host would **pull and install** — it does not rebuild from git.
-
----
-
-## Step 6 — Optional: publish with the Rust CLI yourself
+| Step | Who | What happens |
+|------|-----|--------------|
+| 1 | Factory | Camera gets an identity; the control plane's job-signing key is pinned into its profile |
+| 2 | Camera | Boots and sends a signed join request |
+| 3 | Admin | `ofw-util list-pending`, `ofw-util approve <joinId>` |
+| 4 | Admin | `ofw-util set-password <fingerprint> <password>` — the control plane signs the job and encrypts it to the device |
+| 5 | Camera | Verifies the signature against the pinned key, applies, acks (`acked_ok`) |
 
 ```bash
-# from monorepo root
-cargo build --release --manifest-path cli/Cargo.toml
-
-printf 'manual cli publish' > /tmp/payload.txt
-
-./cli/target/release/ofw publish \
-  --pds http://127.0.0.1:2583 \
-  --identifier publisher.pds.test \
-  --password publisher-pass-change-me \
-  --product demo-site \
-  --version 9.0.0 \
-  --file /tmp/payload.txt \
-  --yes
+./scripts/attack-rogue-control.sh
 ```
 
----
+A camera whose factory profile pins a different control key reaches this control plane. An admin approves it and queues a password change. The camera logs `control plane key does not match the pinned key — refusing enrollment` and the job stays `pending`.
 
-## IoT management (also in this monorepo)
-
-Control plane is on **http://localhost:8787** when started with compose (service `control`).
-
-Synthetic camera e2e (join → approve → password → firmware → factory reset):
-
-```bash
-# from monorepo root
-pnpm --filter @open-firmware/iot-camera-emulator test:e2e
-```
-
-Admin CLI (`ofw-util`):
+The admin CLI by hand:
 
 ```bash
 export OFW_CONTROL_URL=http://127.0.0.1:8787
-export OFW_ADMIN_TOKEN=local-dev-admin-token   # compose default
-node packages/utility/dist/cli.js list-pending
-node packages/utility/dist/cli.js approve <joinId>
+export OFW_ADMIN_TOKEN=local-dev-admin-token      # the value in docker-compose.yml
+node ../../packages/utility/dist/cli.js list-devices
+node ../../packages/utility/dist/cli.js list-jobs
+node ../../packages/utility/dist/cli.js control-key
 ```
 
----
+`GET /v1/meta` shows the job-signing public key and counters. It does not return the admin token.
 
-## Stop and clean up
+## Step 4 — `ofw` by hand
 
 ```bash
-cd examples/full-stack
-docker compose down -v
+export OFW_PDS=http://127.0.0.1:2583
+export OFW_IDENTIFIER=publisher.pds.test
+export OFW_PASSWORD=publisher-pass-change-me       # env var, not --password
+OFW=../../cli/target/release/ofw
+
+printf 'manual publish' > /tmp/payload.txt
+$OFW publish --product demo-site --version 9.0.0 --kind package --file /tmp/payload.txt \
+  --require-pipeline --stages build,test \
+  --oem-key .local/oem.pem --oem-key-id demo-oem-1 --yes
+
+# wait a few seconds for the CI container, then:
+CI_DID=$(node scripts/_pds.mjs did ci-attester.pds.test)
+$OFW pipeline-promote --rkey demo-site-9.0.0-stable --attester-did "$CI_DID"
 ```
 
-`-v` deletes local volumes (PDS data, messages, publisher config).
+Things `ofw` refuses, by design:
 
----
+- publishing a product/version/channel that already exists;
+- `--stages` without `--require-pipeline`;
+- moving the channel to an older version without `--allow-downgrade` (after publishing 9.0.0, the scripts continue from 9.0.1);
+- `pipeline-skip` on a failed gate without `--override-failed`;
+- logging in over plain http to a non-loopback host without `--allow-insecure-http`.
+
+## In production
+
+| In this example | In production |
+|-----------------|---------------|
+| Text payload | Firmware image, package, container tarball |
+| Local PDS on port 2583, local `plc` service | Your PDS over https; the public PLC directory |
+| `publisher.pds.test` with a fixed password | Your handle with an app password in a secret store |
+| OEM key in `.local/oem.pem` | Offline or HSM-held key; only the public key is on devices |
+| `pipeline-runner` container that passes everything | Your CI running real builds and tests, then `ofw pipeline-ack` |
+| Walkthrough container holding the publisher's keys | Nothing like it; the publish step runs in your release job |
+
+## Stop, reset
+
+```bash
+docker compose down            # stop, keep state
+./scripts/demo-reset.sh        # delete all state and start clean (keeps keys and images)
+```
 
 ## Troubleshooting
 
-| Symptom | Try |
-|---------|-----|
-| Walkthrough or front page down | `docker compose ps` and `docker compose logs` |
-| Publish fails login | Wait for bootstrap: `docker compose logs bootstrap` |
-| Message never changes | `docker compose logs sidekar` — look for `applied` |
-| Stale state | `docker compose down -v` then `up --build -d` again |
-
----
-
-## One-sentence summary
-
-**Publish signed software to the PDS → Sidekar verifies and applies it → your app updates — that is Open Firmware.**
+| Symptom | Cause and fix |
+|---------|---------------|
+| `required variable OFW_TRUSTED_OEM_KEYS is missing a value` | `.env` not written yet. Use `./scripts/demo-up.sh`, or run `./scripts/demo-setup.sh` before `docker compose` |
+| `EACCES` / `permission denied` in `sidekar`, `control` or `demo-site` logs | Volumes left by older root-running images. `./scripts/demo-reset.sh` |
+| Happy path stops at step 2, `timed out waiting for acks` | `pipeline-runner` is not running: `docker compose up -d pipeline-runner` |
+| `not promoted: required pipeline acks not present yet` | CI has not acked yet; wait, or run `./scripts/pipeline-runner-once.sh` |
+| Site does not change after a good publish | `docker compose logs --tail 20 sidekar` and look for `REFUSED` or `tick error` |
+| `attack-overwrite.sh`: `the channel points at … not a good release` | The previous step was an attack. Run `demo-happy-path.sh` first |
+| IoT scripts: `TypeScript packages are not built` | From the repository root: `pnpm install --frozen-lockfile && pnpm -r build` |

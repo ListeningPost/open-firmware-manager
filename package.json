@@ -2,7 +2,7 @@
   "name": "open-firmware",
   "private": true,
   "version": "0.1.0",
-  "description": "Production AT Protocol firmware, container, and deployment distribution for IoT and edge",
+  "description": "Early prototype (0.1.0): content-addressed, optionally OEM-signed firmware, package and container distribution for devices and edge hosts over AT Protocol",
   "license": "Apache-2.0",
   "packageManager": "pnpm@9.15.0",
   "engines": {

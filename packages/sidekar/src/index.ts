@@ -104,6 +104,9 @@ export class Sidekar {
 
   private handlers = new Map<string, ApplyHandler>()
   private running = false
+  /** Last refusal / error logged, so a standing condition is reported once. */
+  private lastRefusal = ''
+  private lastTickError = ''
 
   constructor(config: SidekarConfig) {
     // product becomes part of file names under workDir.
@@ -134,6 +137,17 @@ export class Sidekar {
       maxImageBytes: config.maxImageBytes,
       skipPipelineCheck: config.skipPipelineCheck ?? false,
       fetch: config.fetch,
+      // Fail closed, but not silently: say what the channel points at and why
+      // it is not being installed. Logged once per release and reason.
+      onNotInstallable: (r) => {
+        const detail = r.issues.length
+          ? r.issues.map((i) => `${i.code}: ${i.message}`).join('; ')
+          : r.reason
+        const key = `${r.cid}|${detail}`
+        if (key === this.lastRefusal) return
+        this.lastRefusal = key
+        log('REFUSED', r.product, r.version, r.uri, '-', detail)
+      },
     })
 
     // Built-in apply handlers
@@ -252,8 +266,34 @@ export class Sidekar {
     while (this.running && !signal?.aborted) {
       try {
         await this.tick()
+        this.lastTickError = ''
       } catch (e) {
-        log('tick error', e instanceof Error ? e.message : e)
+        // A refused release stays refused on every poll; log it once.
+        const msg = e instanceof Error ? e.message : String(e)
+        if (msg !== this.lastTickError) {
+          this.lastTickError = msg
+          // Phase A failures carry the audit report: name the release and why.
+          const audit = (
+            e as {
+              audit?: {
+                issues?: Array<{ code: string; message: string }>
+                release?: { product?: string; version?: string; uri?: string }
+              }
+            }
+          ).audit
+          if (audit?.issues?.length) {
+            log(
+              'REFUSED',
+              audit.release?.product ?? this.config.product,
+              audit.release?.version ?? '?',
+              audit.release?.uri ?? '',
+              '-',
+              audit.issues.map((i) => `${i.code}: ${i.message}`).join('; '),
+            )
+          } else {
+            log('tick error', msg)
+          }
+        }
       }
       await sleep(this.config.pollIntervalMs, signal)
     }

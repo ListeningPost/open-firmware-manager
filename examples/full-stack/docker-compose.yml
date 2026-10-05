@@ -1,22 +1,40 @@
 # Full-stack example with a REAL AT Protocol PDS as the distribution center.
 #
-# Guided walkthrough (start here):
-#   ./scripts/gen-pds-secrets.sh
-#   docker compose up --build -d
-#   open http://localhost:8099
-#   ./scripts/publish-to-pds.sh "Hello walkthrough"
-#   open http://localhost:8080
+#   ./scripts/demo-up.sh            # keys + build + start + wait until healthy
+#   ./scripts/demo-happy-path.sh    # OEM-signed, CI-attested release -> applied
+#   ./scripts/attack-unsigned.sh    # stolen password, no OEM key -> refused
+#   ./scripts/demo-reset.sh         # wipe state, start clean
 #
-# See WALKTHROUGH.md for the full plain-language tour.
+# Presenter runbook: ../../docs/demo-runbook.md. Tour: WALKTHROUGH.md.
+#
+# Demo only: fixed local credentials, ports bound to 127.0.0.1.
+# `.env` (written by scripts/demo-setup.sh) supplies OFW_TRUSTED_OEM_KEYS and
+# OFW_OEM_KEY_B64.
 
 name: open-firmware-example
 
+x-node-health: &node-health
+  interval: 2s
+  timeout: 3s
+  retries: 30
+  start_period: 2s
+
 services:
+  # ── Local DID directory (stand-in for plc.directory; demo only) ──────
+  plc:
+    build:
+      context: ./services/mock-plc
+    volumes:
+      - plc-data:/data
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:2582/_health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
   # ── Distribution center: AT Protocol PDS ─────────────────────────────
   pds:
     image: ghcr.io/bluesky-social/pds:0.4
     ports:
-      - "2583:2583"
+      - "127.0.0.1:2583:2583"
     env_file:
       - pds.env
       - pds.secrets.env
@@ -26,50 +44,49 @@ services:
       PDS_HOSTNAME: pds.test
     volumes:
       - pds-data:/pds
+    depends_on:
+      plc:
+        condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:2583/xrpc/_health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
-        ]
-      interval: 5s
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:2583/xrpc/_health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
       timeout: 5s
-      retries: 20
-      start_period: 10s
+      retries: 40
+      start_period: 5s
 
-  # One-shot: create publisher account + write DID for Sidekar
+  # One-shot: create the publisher and the independent CI attester account,
+  # write their DIDs to the shared config volume.
   bootstrap:
-    image: node:22-alpine
+    build:
+      context: ./services/bootstrap
     depends_on:
       pds:
         condition: service_healthy
     environment:
       PDS_URL: http://pds:2583
       OFW_HANDLE: publisher.pds.test
-      OFW_EMAIL: publisher@mail.test
       OFW_PASSWORD: publisher-pass-change-me
+      OFW_CI_HANDLE: ci-attester.pds.test
+      OFW_CI_PASSWORD: ci-pass-change-me
       OUT_DIR: /config
     volumes:
       - publisher-config:/config
-      - ./scripts/bootstrap-publisher.mjs:/bootstrap.mjs:ro
-    entrypoint: ["node", "/bootstrap.mjs"]
     restart: "no"
 
-  # ── Pipeline runner: generic CI/validator (NOT Sidekar) ─────────────
-  # Posts pipeline-ack for awaiting-pipeline gates. Replace with GHA/etc.
+  # ── CI attester: its own account, writes pipeline acks only ──────────
+  # Holds no publisher credentials: it cannot promote, and it is not Sidekar.
+  # Replace with GitHub Actions etc. running `ofw pipeline-ack`.
   pipeline-runner:
     build:
       context: ./services/pipeline-runner
     environment:
       PDS_URL: http://pds:2583
-      HOST_PDS_URL: http://pds:2583
       AUTHOR_DID_FILE: /config/author.did
-      OFW_IDENTIFIER: publisher.pds.test
-      OFW_PASSWORD: publisher-pass-change-me
+      OFW_CI_IDENTIFIER: ci-attester.pds.test
+      OFW_CI_PASSWORD: ci-pass-change-me
       AUTO_ACK: "1"
-      POLL_MS: "1200"
+      POLL_MS: "1000"
+      STAGE_DELAY_MS: "1200"
       STAGES: build,test
       HEALTH_PORT: "9091"
     volumes:
@@ -79,28 +96,48 @@ services:
         condition: service_healthy
       bootstrap:
         condition: service_completed_successfully
-    # health for walkthrough (docker network only; no host publish required)
     expose:
       - "9091"
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9091/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
-  # ── Sidekar: installer only — applies ready releases ────────────────
-  # Still a full Docker container — separate from pipeline-runner.
+  # ── Sidekar: installer only — verifies, then applies ─────────────────
+  # Trust policy (all enforced on this side, whatever the publisher claims):
+  #   * release must be signed by a pinned OEM key      (OFW_TRUSTED_OEM_KEYS)
+  #   * build+test must be acked by the CI attester DID (OFW_ATTESTER_DIDS)
+  #   * only this publisher's repo is followed          (AUTHOR_DID_FILE)
   sidekar:
     build:
       context: ../..
       dockerfile: examples/full-stack/services/sidekar/Dockerfile
+    # The attester DID is only known after bootstrap, so read it at start.
+    command:
+      - sh
+      - -c
+      - |
+        OFW_ATTESTER_DIDS="$$(cat /config/attester.did)" || exit 1
+        export OFW_ATTESTER_DIDS
+        echo "sidekar policy: trusted OEM key(s) $$OFW_TRUSTED_OEM_KEYS"
+        echo "sidekar policy: required CI attester $$OFW_ATTESTER_DIDS, stages $$OFW_REQUIRED_PIPELINE_STAGES"
+        exec node dist/cli.js
     environment:
       PDS_URL: http://pds:2583
       PRODUCT: demo-site
       CHANNEL: stable
       PACKAGE_TARGET: /site/message.txt
-      MESSAGE_FILE: /site/message.txt
       WORK_DIR: /var/lib/sidekar
       STATE_FILE: /var/lib/sidekar/state.json
-      POLL_MS: "800"
+      POLL_MS: "1000"
       AUTHOR_DID_FILE: /config/author.did
+      # The example applies a text "package"; no docker socket is mounted.
       DOCKER_LOAD: "0"
       HEALTH_PORT: "9090"
+      OFW_TRUSTED_OEM_KEYS: ${OFW_TRUSTED_OEM_KEYS:?run ./scripts/demo-setup.sh first (it writes .env)}
+      OFW_REQUIRE_OEM_SIGNATURE: "1"
+      OFW_REQUIRED_PIPELINE_STAGES: build,test
+      # The demo payload is a few bytes; refuse anything over 1 MiB.
+      OFW_MAX_IMAGE_BYTES: "1048576"
     volumes:
       - site-data:/site
       - sidekar-data:/var/lib/sidekar
@@ -112,64 +149,73 @@ services:
         condition: service_completed_successfully
     expose:
       - "9090"
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9090/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
   # ── Example workload updated by Sidekar package apply ───────────────
   demo-site:
     build:
       context: ./services/demo-site
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       PORT: "8080"
       MESSAGE_FILE: /data/message.txt
       DEFAULT_MESSAGE: "Waiting for Sidekar to apply a signed release from the PDS…"
     volumes:
-      - site-data:/data
+      - site-data:/data:ro
     depends_on:
-      - sidekar
+      sidekar:
+        condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
-        ]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
-  # ── Private control plane (join approve + sealed jobs) ───────────────
+  # ── Private control plane (join approve + sealed, signed jobs) ───────
   control:
     build:
       context: ../..
       dockerfile: apps/server/Dockerfile
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     environment:
       PORT: "8787"
       DATA_FILE: /data/control-store.json
-      OFW_ADMIN_TOKEN: local-dev-admin-token
-      OFW_REVEAL_ADMIN_TOKEN: "1"
+      # Fixed for the demo. /v1/meta never returns it; clients are given it.
+      OFW_ADMIN_TOKEN: ${OFW_ADMIN_TOKEN:-local-dev-admin-token}
+      # No browser calls this API in the example (the walkthrough server
+      # queries it server-side), so CORS stays off. Set OFW_CORS_ORIGIN to an
+      # exact origin if you put a browser UI in front of it.
     volumes:
       - control-data:/data
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
-  # ── Guided walkthrough UI (plain language + live status) ─────────────
+  # ── Guided walkthrough UI (live status + publisher console) ──────────
+  # Plays the publisher's release workstation: it holds the publisher
+  # password and the OEM signing key so its buttons can publish. Demo only.
   walkthrough:
     build:
       context: ../..
       dockerfile: examples/full-stack/services/walkthrough/Dockerfile
     ports:
-      - "8099:8099"
+      - "127.0.0.1:8099:8099"
     environment:
       PORT: "8099"
       PDS_URL: http://pds:2583
       DEMO_URL: http://demo-site:8080
       SIDEKAR_HEALTH: http://sidekar:9090
       RUNNER_HEALTH: http://pipeline-runner:9091
+      CONTROL_URL: http://control:8787
+      OFW_ADMIN_TOKEN: ${OFW_ADMIN_TOKEN:-local-dev-admin-token}
       AUTHOR_DID_FILE: /config/author.did
+      ATTESTER_DID_FILE: /config/attester.did
       OFW_IDENTIFIER: publisher.pds.test
       OFW_PASSWORD: publisher-pass-change-me
+      OFW_TRUSTED_OEM_KEYS: ${OFW_TRUSTED_OEM_KEYS:?run ./scripts/demo-setup.sh first (it writes .env)}
+      OFW_OEM_KEY_B64: ${OFW_OEM_KEY_B64:?run ./scripts/demo-setup.sh first (it writes .env)}
       PRODUCT: demo-site
     volumes:
       - publisher-config:/config:ro
@@ -181,11 +227,17 @@ services:
       demo-site:
         condition: service_healthy
       sidekar:
-        condition: service_started
+        condition: service_healthy
       pipeline-runner:
-        condition: service_started
+        condition: service_healthy
+      control:
+        condition: service_healthy
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8099/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
 volumes:
+  plc-data:
   pds-data:
   site-data:
   sidekar-data:

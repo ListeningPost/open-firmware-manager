@@ -3,55 +3,69 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Open Firmware · PDS-backed stack</title>
+  <title>Open Firmware · who checks what</title>
   <style>
-    :root { color-scheme: dark; --bg:#070b14; --card:#121a2b; --line:#243247; --text:#e8eef7; --muted:#9aa8bc; --ok:#4ade80; --accent:#60a5fa; }
-    body { margin:0; font-family:system-ui,sans-serif; background:radial-gradient(900px 500px at 10% -10%,#1e3a5f,transparent 55%),var(--bg); color:var(--text); }
-    main { max-width:960px; margin:0 auto; padding:1.5rem; }
+    :root { color-scheme: dark; --bg:#070b14; --card:#121a2b; --line:#243247; --text:#e8eef7; --muted:#9aa8bc; --ok:#4ade80; --bad:#f87171; --accent:#60a5fa; }
+    body { margin:0; font-family:system-ui,sans-serif; background:radial-gradient(900px 500px at 10% -10%,#1e3a5f,transparent 55%),var(--bg); color:var(--text); line-height:1.45; }
+    main { max-width:1040px; margin:0 auto; padding:1.5rem; }
     h1 { font-size:1.5rem; margin:0 0 .5rem; }
+    h2 { font-size:1.05rem; margin:1.5rem 0 .5rem; color:#c7d2fe; }
     p { color:var(--muted); }
-    .badge { display:inline-block; padding:.25rem .7rem; border-radius:999px; background:rgba(74,222,128,.12); color:var(--ok); border:1px solid rgba(74,222,128,.35); font-size:.8rem; font-weight:600; }
-    .flow { display:grid; grid-template-columns:1fr auto 1fr auto 1fr auto 1fr; gap:.5rem; margin:1.5rem 0; align-items:stretch; }
-    @media(max-width:800px){ .flow{grid-template-columns:1fr;} }
-    .node { background:var(--card); border:1px solid var(--line); border-radius:.85rem; padding:1rem; }
+    .flow { display:grid; grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr; gap:.5rem; margin:1.25rem 0; align-items:stretch; }
+    @media(max-width:900px){ .flow{grid-template-columns:1fr;} .arrow{transform:rotate(90deg);} }
+    .node { background:var(--card); border:1px solid var(--line); border-radius:.85rem; padding:.9rem; font-size:.9rem; }
     .node h3 { margin:0 0 .35rem; color:var(--accent); font-size:.95rem; }
-    .node code { font-size:.78rem; color:#cbd5e1; word-break:break-all; }
+    .node code, td code, pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.78rem; color:#cbd5e1; }
     .arrow { display:flex; align-items:center; justify-content:center; color:#818cf8; font-weight:700; }
     .card { background:var(--card); border:1px solid var(--line); border-radius:.85rem; padding:1rem; margin:1rem 0; }
-    pre { background:#0b1220; border:1px solid var(--line); border-radius:.5rem; padding:.75rem; overflow:auto; font-size:.8rem; color:#a5b4fc; }
+    table { width:100%; border-collapse:collapse; font-size:.9rem; }
+    th, td { text-align:left; padding:.45rem .5rem; border-bottom:1px solid var(--line); vertical-align:top; }
+    th { color:var(--muted); font-size:.72rem; text-transform:uppercase; }
+    .ok { color:var(--ok); font-weight:700; } .bad { color:var(--bad); font-weight:700; }
+    pre { background:#0b1220; border:1px solid var(--line); border-radius:.5rem; padding:.75rem; overflow:auto; color:#a5b4fc; }
     a { color:var(--accent); }
   </style>
 </head>
 <body>
 <main>
-  <h1>Distribution center = AT Protocol PDS</h1>
-  <p>The mock HTTP “dist-center” is gone from the default path. Releases live on a real Bluesky PDS container.</p>
-  <div class="badge">Verified live: ofw → PDS :2583 → Sidekar → demo-site :8080</div>
+  <h1>Open Firmware — who checks what</h1>
+  <p>Static overview of the full-stack example. For live status open the walkthrough at
+    <a href="http://localhost:8099">http://localhost:8099</a> while the stack is running.</p>
 
   <div class="flow">
-    <div class="node"><h3>1. ofw CLI</h3><code>publish --pds :2583</code></div>
+    <div class="node"><h3>1. Publisher</h3><code>ofw publish --oem-key …</code><br/>holds the OEM signing key and the PDS password</div>
     <div class="arrow">→</div>
-    <div class="node"><h3>2. PDS</h3><code>ghcr.io/bluesky-social/pds</code><br/><code>records + blobs</code></div>
+    <div class="node"><h3>2. PDS</h3><code>:2583</code><br/>real AT Protocol server: immutable release record, blobs, gate, channel pointer</div>
     <div class="arrow">→</div>
-    <div class="node"><h3>3. Sidekar</h3><code>listRecords · getBlob</code><br/><code>Phase A/B</code></div>
+    <div class="node"><h3>3. CI attester</h3><code>ci-attester.pds.test</code><br/>own account; acks build + test for one exact release CID</div>
     <div class="arrow">→</div>
-    <div class="node"><h3>4. demo-site</h3><code>:8080 front page</code></div>
+    <div class="node"><h3>4. Sidekar</h3>pins the publisher DID, the OEM public key and the CI DID; verifies, then applies</div>
+    <div class="arrow">→</div>
+    <div class="node"><h3>5. demo-site</h3><code>:8080</code><br/>shows the applied payload</div>
   </div>
 
+  <h2>What an attacker needs</h2>
   <div class="card">
-    <strong>Live apply log</strong>
-    <pre>candidate 1.0.1971 at://did:plc:…/app.openfirmware.firmware.release/demo-site-1.0.1971-stable
-Phase A OK — assembling 1 chunk(s)
-APPLIED 1.0.1971 → /site/message.txt "Hello from the real AT Protocol PDS — …"</pre>
+    <table>
+      <thead><tr><th>Attacker has</th><th>Script</th><th>PDS</th><th>Sidekar</th></tr></thead>
+      <tbody>
+        <tr><td>Publisher password only; publishes unsigned, skips CI</td><td><code>scripts/attack-unsigned.sh</code></td><td>accepts</td><td><span class="bad">refuses</span> — no CI attestation, no OEM signature</td></tr>
+        <tr><td>Publisher password; signs with own key, passes CI</td><td><code>scripts/attack-wrong-key.sh</code></td><td>accepts</td><td><span class="bad">refuses</span> — key is not the pinned OEM key</td></tr>
+        <tr><td>Publisher password; rewrites a live release in place</td><td><code>scripts/attack-overwrite.sh</code></td><td>accepts the raw write</td><td><span class="bad">refuses</span> — content ID no longer matches the pinned one</td></tr>
+        <tr><td>Network position; camera reaches a rogue control plane</td><td><code>scripts/attack-rogue-control.sh</code></td><td>—</td><td>camera <span class="bad">refuses</span> to enroll — control key is not the pinned one</td></tr>
+        <tr><td>Publisher password <em>and</em> OEM key <em>and</em> a passing CI run</td><td>—</td><td>accepts</td><td><span class="ok">installs</span> — this is the legitimate path</td></tr>
+      </tbody>
+    </table>
   </div>
 
+  <h2>Run it</h2>
   <div class="card">
-    <strong>Open</strong>
-    <ul>
-      <li><a href="http://localhost:8080">http://localhost:8080</a> — front page</li>
-      <li><a href="http://localhost:2583/xrpc/_health">http://localhost:2583/xrpc/_health</a> — PDS health</li>
-    </ul>
-    <pre>./scripts/publish-to-pds.sh "your next message"</pre>
+    <pre>./scripts/demo-up.sh                       # start, wait until healthy
+./scripts/demo-happy-path.sh "Hello"       # signed + attested release, applied
+./scripts/attack-unsigned.sh               # fails closed
+./scripts/iot-demo.sh                      # camera joins, admin approves, signed job
+./scripts/demo-reset.sh                    # clean slate</pre>
+    <p>Presenter runbook: <code>docs/demo-runbook.md</code>.</p>
   </div>
 </main>
 </body>

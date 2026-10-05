@@ -1,6 +1,6 @@
 # `@open-firmware/client`
 
-Production **IoT / edge** client library.
+**IoT / edge** client library (early prototype).
 
 - Connects to a PDS (private or public)
 - Phase A metadata audit, then Phase B download/verify

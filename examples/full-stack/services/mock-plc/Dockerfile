@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+# Base image pinned by digest (tag: node:22-alpine). Dependabot's docker
+# ecosystem keeps the digest current.
+# Build context: this directory. No dependencies, so a single stage suffices.
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --chown=node:node server.mjs ./
+# /data holds the registered DID operations (named volume in the example).
+RUN mkdir -p /data && chown node:node /data
+ENV PORT=2582
+ENV DATA_FILE=/data/plc.json
+EXPOSE 2582
+USER node
+CMD ["node", "server.mjs"]

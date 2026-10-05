@@ -17,36 +17,36 @@ A03,api,blocker,done,listRecords cursor loop; stop using first-page limits,packa
 A04,api,blocker,done,getRecord by repo/collection/rkey/cid instead of scanning listRecords,packages/atproto-lite/src/client.ts;packages/client/src/index.ts
 A05,api,blocker,done,putRecord/deleteRecord swapRecord+swapCommit CAS,packages/atproto-lite/src/client.ts
 A06,api,high,done,Authorization on GET when session exists (private PDS),packages/atproto-lite/src/client.ts
-A07,api,high,done,Identity: resolveHandle + did:plc + did:web + #atproto_pds,packages/atproto-lite/src/identity.ts
+A07,api,high,done,Identity helpers: resolveHandle + did:plc + did:web + #atproto_pds (library only; no caller yet - consumers do not resolve DIDs),packages/atproto-lite/src/identity.ts
 A08,api,high,done,AtUri parse; DID taken from at:// not constructor,packages/atproto-lite/src/uri.ts
 A09,api,high,done,Blob CID (CIDv1 raw sha2-256) recomputed vs blob.ref.$link,packages/atproto-lite/src/cid.ts
 A10,api,high,done,uploadBlob Uint8Array no Buffer; timeouts; typed session,packages/atproto-lite/src/client.ts
-A11,api,medium,done,OAuth client-metadata + bot vs user auth documented; CLI stays createSession,packages/atproto-lite/src/oauth.ts;docs/oauth-client-metadata.json
+A11,api,medium,partial,OAuth client-metadata template only (no OAuth flow implemented); CLI stays createSession,packages/atproto-lite/src/oauth.ts;docs/oauth-client-metadata.json
 C01,core,blocker,done,Types match lexicons; parts[] not reply chain,packages/core/src/types/index.ts
 C02,core,high,done,Phase A metadata-only (no blob download); CID/layout/author checks,packages/core/src/audit/index.ts
 C03,core,high,done,OEM ed25519 sign/verify over canonical release tuple,packages/core/src/sign/index.ts
 C04,core,high,done,Pipeline audit ignores foreign-uri acks instead of hard-fail; custom:stageId keys,packages/core/src/pipeline/index.ts
-C05,core,medium,done,skewSec honored in service windows,packages/core/src/window/index.ts
+C05,core,medium,done,skewSec honored in service windows (library function; no component enforces windows yet),packages/core/src/window/index.ts
 C06,core,medium,done,Default chunk 4MiB; cap at 50MiB Bluesky blob limit,packages/core/src/chunk/index.ts
 H01,host,blocker,done,Single immutable createRecord after all blobs; never mutate release CID,packages/host/src/index.ts
 H02,host,blocker,done,Channel pointer + gate sidecar with swapRecord,packages/host/src/index.ts
 H03,host,high,done,Do not swallow putRecord errors; map XRPCError,packages/host/src/index.ts
-H04,host,high,done,Republish uses swapRecord; no orphaned reply chunks,packages/host/src/index.ts
+H04,host,high,done,Republish of an existing version is refused (create-only release); gate and channel use swapRecord,packages/host/src/index.ts
 K01,client,blocker,done,resolveLatest via channel getRecord; pin CID,packages/client/src/index.ts
 K02,client,blocker,done,Parse DID from URI; trustedAuthors is a real allow-list,packages/client/src/index.ts
 K03,client,blocker,done,downloadVerified runs pipeline gate; uses core semver,packages/client/src/index.ts
 K04,client,high,done,Phase B verifies sha256 AND blob CID,packages/client/src/index.ts
 R01,rust,blocker,done,Rust XRPC: refresh cursor swap auth-GET getBlob typed errors parts[] channel,cli/src/atproto/mod.rs;cli/src/publish.rs
-S01,security,critical,done,Reject unsigned firmware.apply; offer is releaseUri devices pull+verify,apps/server/src/index.ts;packages/iot/src/agent.ts
-S02,security,high,done,Bind join fingerprint to product|pubkey; replay window on device auth,apps/server/src/index.ts
-S03,security,high,done,Timing-safe admin token; never log token; atomic locked store,apps/server/src/store.ts
+S01,security,critical,partial,firmware.apply rejected by server and device; firmware.offer is authenticated and handed to an app callback - no default pull+verify handler (acked unsupported without one),apps/server/src/index.ts;packages/iot/src/agent.ts
+S02,security,high,done,Bind join fingerprint to product|pubkey; skew window plus single-use nonce on device auth (nonce cache is in memory),apps/server/src/index.ts
+S03,security,high,partial,Timing-safe admin token; token logged only with OFW_REVEAL_ADMIN_TOKEN=1; atomic rename with 0600 mode; writes serialized in one process only (no cross-process lock),apps/server/src/store.ts
 S04,security,high,done,Consumer skip env is OFW_CONSUMER_SKIP_PIPELINE not OFW_SKIP_PIPELINE,packages/sidekar/src/cli.ts
 S05,security,medium,done,Pending joins cannot pull jobs; by-fingerprint does not leak serial,apps/server/src/index.ts
-F01,fleet,high,done,Implement fleet writers (enrollment policy offer adminGrant identity status),packages/fleet/src/index.ts
-F02,appview,high,done,Minimal AppView serving getLatest/listReleases/getRelease as untrusted index,packages/appview/src/index.ts
+F01,fleet,high,done,Fleet writers (enrollment policy offer adminGrant identity status) - writers only; no tests and nothing consumes the records,packages/fleet/src/index.ts
+F02,appview,high,done,Minimal in-memory AppView class serving getLatest/listReleases/getRelease as untrusted index (no entrypoint or persistence),packages/appview/src/index.ts
 T01,tests,blocker,done,atproto-lite host client core tests for pagination refresh swap CID OEM,packages/*/test
-T02,docs,high,done,Spec/architecture/SECURITY match implementation,docs/spec-release-chain.md;docs/architecture.md;SECURITY.md
-T03,quality,medium,done,Fill stub packages (fleet cli node) so workspace is not paper,packages/fleet;packages/cli
+T02,docs,high,done,Spec/architecture/SECURITY re-audited against code on demo-prep; commit-signature and DID-resolution claims removed; limitations listed,docs/spec-release-chain.md;docs/architecture.md;SECURITY.md
+T03,quality,medium,partial,fleet is writers only without tests; packages/cli is a re-export of host; apps/web is an empty scaffold,packages/fleet;packages/cli
 Q01,cicd,high,done,ofw --json emits only JSON on stdout; human logs on stderr,cli/src/publish.rs;cli/src/commands/publish_cmd.rs
 Q02,cicd,high,done,GHA example parses .rkey/.gate with jq -e; comments match gate/channel,cli/examples/github-actions-publish.yml
 Q03,api,high,done,Refresh only on ExpiredToken not every 401,packages/atproto-lite/src/client.ts
@@ -54,10 +54,10 @@ Q04,host,medium,done,Missing-record upsert keyed off RecordNotFound not all HTTP
 Q05,agent,medium,done,Sidekar poll sleep aborts on SIGTERM,packages/sidekar/src/index.ts
 Q06,core,medium,done,Service-window skewSec samples now-skew now now+skew,packages/core/src/window/index.ts
 Q07,client,high,done,resolveLatest returns null on missing channel instead of throwing every poll,packages/client/src/index.ts
-Q08,host,medium,done,Promote on skipped acks; dedupe markReady,packages/host/src/index.ts
+Q08,host,medium,partial,TS host promotes on skipped acks and dedupes markReady; unlike ofw it has no downgrade guard and can re-promote a failed gate,packages/host/src/index.ts
 Q09,api,medium,done,listRecords stops on repeated cursor / max pages,packages/atproto-lite/src/client.ts;cli/src/atproto/mod.rs
 Q10,cicd,medium,done,Walkthrough paginates records and reads live channel pointers,examples/full-stack/services/walkthrough/server.js
 Q11,cli,medium,done,ofw audit --probe-blobs downloads and checks part sha256,cli/src/commands/audit_cmd.rs
 D01,client,blocker,done,isMissingRecord matches PDS InvalidRequest Could not locate record,packages/atproto-lite/src/error.ts
 D02,cicd,high,done,Independent CI attester: pipeline-ack --author-did + pipeline-promote --attester-did,cli/src/commands/pipeline_cmd.rs;packages/host/src/index.ts
-D03,agent,high,done,Sidekar OFW_ATTESTER_DIDS so publisher self-acks do not satisfy the gate,packages/sidekar/src/cli.ts
+D03,agent,high,done,Sidekar OFW_ATTESTER_DIDS: attester acks bound to release CID are required whatever the release declares,packages/sidekar/src/cli.ts
